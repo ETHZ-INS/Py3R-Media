@@ -2,7 +2,6 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-import cv2
 from pypylon import pylon
 
 from py3r.media.types import VideoFrame
@@ -51,7 +50,7 @@ class PylonCameraSource:
 
     def set_playback_rate(self, mode: str) -> None: pass
     def seek(self, frame_index: int) -> None: pass
-    def enable_grayscale(self, gray: bool) -> None: self._gray = gray
+    def enable_grayscale(self, gray: bool) -> None: pass
 
     def read(self, timeout: Optional[float] = None) -> Optional[VideoFrame]:
 
