@@ -138,7 +138,6 @@ class FFmpegVideoFileSource:
         cmd = [
             "ffmpeg","-hide_banner","-loglevel", self._loglevel,
             "-nostdin",              # avoid blocking on stdin in some envs
-            "-fflags","nobuffer",    # hint: lower latency
             "-i", str(self._path),
             "-an","-sn","-dn",
             "-pix_fmt", pix_fmt,
