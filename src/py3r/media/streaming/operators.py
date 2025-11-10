@@ -196,40 +196,96 @@ def observe_on_bounded(scheduler, maxsize=256, policy="block") -> Callable[[rx.O
     return _op
 
 
-def adaptive_smoother(alpha: float = 0.05, init_period: float = 1/30, scheduler=None) -> Callable[[rx.Observable[_T]], rx.Observable[_T]]:
+def adaptive_pace(
+    initial_interval: Optional[float] = None,
+    learn_rate: float = 0.1,
+    scheduler: Optional[rx.abc.SchedulerBase] = None,
+) -> Callable[[rx.Observable[_T]], rx.Observable[_T]]:
     """
-    Return an operator that turns a bursty stream into a steady cadence
-    whose period follows an exponential moving average of recent arrivals.
+    Normalize pacing of an observable sequence to a steady rate inferred from input timing.
+
+    Args:
+        initial_interval: Initial guess for frame period in seconds (e.g. 1/30 for 30fps).
+        learn_rate: Exponential moving average factor for adapting the interval.
+        scheduler: Optional scheduler (defaults to a new thread).
+
+    Returns:
+        Operator: Observable[T] -> Observable[T]
     """
-    scheduler = scheduler or EventLoopScheduler()     # single FIFO worker
+    if scheduler is None:
+        scheduler = EventLoopScheduler()
 
     def _op(source: rx.Observable[_T]) -> rx.Observable[_T]:
-        state = {
-            "next_due": None,       # wall-clock time when NEXT item should emit
-            "ema": init_period,     # running average period
-            "last_arrival": None    # arrival time of the previous input
-        }
+        def _subscribe(observer: rx.abc.ObserverBase[_T], _scheduler: Optional[rx.abc.SchedulerBase] = None) -> rx.abc.DisposableBase:
+            q: queue.Queue[_T] = queue.Queue()
+            last_time: Optional[float] = None
+            period: float = initial_interval or 0.0
+            stopped = threading.Event()
+            disposed = threading.Event()
 
-        def mapper(item):
-            now = time.time()
+            def update_interval(now: float):
+                nonlocal last_time, period
+                if last_time is not None:
+                    dt = now - last_time
+                    if period <= 0:
+                        period = dt
+                    else:
+                        period = (1 - learn_rate) * period + learn_rate * dt
+                last_time = now
 
-            # update EMA of arrival intervals
-            if state["last_arrival"] is not None:
-                interval = now - state["last_arrival"]
-                state["ema"] = alpha * interval + (1-alpha) * state["ema"]
-            state["last_arrival"] = now
+            def on_next(x: _T):
+                update_interval(time.perf_counter())
+                q.put(x)
 
-            # schedule this item
-            if state["next_due"] is None or state["next_due"] < now:
-                state["next_due"] = now            # no backlog: emit ASAP
+            def on_error(err: Exception):
+                stopped.set()
+                observer.on_error(err)
 
-            delay = state["next_due"] - now        # ≥ 0
-            state["next_due"] += state["ema"]      # advance for next item
+            def on_completed():
+                stopped.set()
 
-            return rx.of(item).pipe(
-                ops.delay(delay, scheduler=scheduler)
-            )
+            src_disp = source.subscribe(on_next, on_error, on_completed, scheduler=scheduler)
 
-        return source.pipe(ops.flat_map(mapper))
+            def emit_loop():
+                try:
+                    """Emit items at the learned interval until source completes or disposed."""
+                    nonlocal period
+                    while not disposed.is_set():
+                        # Try to get a frame
+                        try:
+                            item = q.get(timeout=0.01)
+                            observer.on_next(item)
+                        except queue.Empty:
+                            pass
 
+                        if stopped.is_set() and q.empty():
+                            observer.on_completed()
+                            return
+
+                        # Sleep for the current period (split into small chunks)
+                        sleep_time = max(period, 1e-6) if period > 0 else 0.001
+                        deadline = time.perf_counter() + sleep_time
+                        while True:
+                            if disposed.is_set():
+                                return
+                            remaining = deadline - time.perf_counter()
+                            if remaining <= 0:
+                                break
+                            time.sleep(min(0.002, remaining))
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+
+            # Schedule the emitter on its own thread
+            emit_disp = scheduler.schedule(lambda *_: emit_loop())
+
+            def dispose():
+                disposed.set()
+                src_disp.dispose()
+                with q.mutex:
+                    q.queue.clear()
+
+            return CompositeDisposable(src_disp, emit_disp, Disposable(dispose))
+
+        return rx.create(_subscribe)
     return _op
