@@ -17,12 +17,10 @@ def video_source_observable(src: VideoSource, scheduler: EventLoopScheduler):
 
     def resource_factory():
         # open on the scheduler thread
-        print(f"_open {threading.current_thread().name}")
         src.open()
 
         # close on the scheduler thread (even if dispose() is called elsewhere)
         def _dispose():
-            print(f"_dispose {threading.current_thread().name}")
             src.close()
         return Disposable(_dispose)
 
