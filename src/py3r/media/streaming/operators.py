@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from concurrent.futures import Future
 from typing import Callable, TypeVar, Optional
 from threading import Lock
 
 import reactivex as rx
+from reactivex import operators as ops
 from reactivex.disposable import Disposable, CompositeDisposable, SerialDisposable
+from reactivex.scheduler import EventLoopScheduler
 
 _T = TypeVar("_T")
 
@@ -190,4 +193,43 @@ def observe_on_bounded(scheduler, maxsize=256, policy="block") -> Callable[[rx.O
 
             return CompositeDisposable(upstream, wdisp, Disposable(dispose))
         return rx.create(_subscribe)
+    return _op
+
+
+def adaptive_smoother(alpha: float = 0.05, init_period: float = 1/30, scheduler=None) -> Callable[[rx.Observable[_T]], rx.Observable[_T]]:
+    """
+    Return an operator that turns a bursty stream into a steady cadence
+    whose period follows an exponential moving average of recent arrivals.
+    """
+    scheduler = scheduler or EventLoopScheduler()     # single FIFO worker
+
+    def _op(source: rx.Observable[_T]) -> rx.Observable[_T]:
+        state = {
+            "next_due": None,       # wall-clock time when NEXT item should emit
+            "ema": init_period,     # running average period
+            "last_arrival": None    # arrival time of the previous input
+        }
+
+        def mapper(item):
+            now = time.time()
+
+            # update EMA of arrival intervals
+            if state["last_arrival"] is not None:
+                interval = now - state["last_arrival"]
+                state["ema"] = alpha * interval + (1-alpha) * state["ema"]
+            state["last_arrival"] = now
+
+            # schedule this item
+            if state["next_due"] is None or state["next_due"] < now:
+                state["next_due"] = now            # no backlog: emit ASAP
+
+            delay = state["next_due"] - now        # ≥ 0
+            state["next_due"] += state["ema"]      # advance for next item
+
+            return rx.of(item).pipe(
+                ops.delay(delay, scheduler=scheduler)
+            )
+
+        return source.pipe(ops.flat_map(mapper))
+
     return _op
