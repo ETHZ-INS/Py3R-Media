@@ -15,6 +15,8 @@ class FFmpegVideoFileSource:
         self._fps: Optional[float] = None
         self._size: Optional[Tuple[int,int]] = None
         self._channels: int = 1 if grayscale else 3
+        self._num_frames: Optional[int] = None
+
         self._mode: str = "original_speed"
         self._idx: int = 0
         self._t0: float = 0.0
@@ -29,11 +31,11 @@ class FFmpegVideoFileSource:
         self._probe()
 
     # --- protocol-ish bits (same as before) ---
-    def name(self) -> str: return f"ffmpeg:{self._path.name}"
     def open(self) -> None:
         self._start_proc()
         self._idx = 0
         self._t0 = time.perf_counter()
+
     def close(self) -> None:
         if self._proc and self._proc.poll() is None:
             try:
@@ -42,14 +44,19 @@ class FFmpegVideoFileSource:
             except Exception:
                 self._proc.kill()
         self._proc = None
+
     def is_open(self) -> bool: return self._proc is not None and self._proc.poll() is None
+
     def has_timing(self) -> bool: return True
-    def has_fixed_fps(self) -> bool: return True
-    def has_fixed_size(self) -> bool: return True
+    def has_size(self) -> bool: return True
+    def has_fps(self) -> bool: return True
+    def has_num_frames(self) -> bool: return not self._loop
     def is_seekable(self) -> bool: return True
-    def get_fps(self) -> Optional[float]: return self._fps
+
     def get_size(self) -> Optional[Tuple[int,int]]: return self._size
+    def get_fps(self) -> Optional[float]: return self._fps
     def get_num_channels(self) -> int: return self._channels
+    def get_num_frames(self) -> Optional[int]: return self._num_frames
 
     def set_playback_rate(self, mode: str) -> None:
         assert mode in {"original_speed", "max_speed"}
