@@ -13,13 +13,10 @@ class CvWindow(Disposable):
     def __init__(self, name):
         super().__init__()
         self.name = name
-        print(f"CvWindow.__init__ {threading.current_thread().name}")
         cv2.namedWindow(self.name)
 
     def dispose(self):
-        print(f"CvWindow.dispose {threading.current_thread().name}")
         cv2.destroyWindow(self.name)
-        print("CvWindow closed")
 
 class OpenCVImshowViewer(rx.Observer[HasImage | np.ndarray]):
     def __init__(self, window_name="Video"):
@@ -39,4 +36,3 @@ class OpenCVImshowViewer(rx.Observer[HasImage | np.ndarray]):
             return upstream
 
         return rx.using(resource_factory, observable_factory)
-

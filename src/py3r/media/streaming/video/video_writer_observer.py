@@ -18,14 +18,12 @@ class _VideoWriterResource(Disposable):
         self._writer = writer
         self._closed = False
         self._lock = Lock()
-        print(f"_VideoWriterResource.__init__ {threading.current_thread().name}")
 
     def dispose(self) -> None:
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            print(f"_VideoWriterResource.dispose {threading.current_thread().name}")
             try:
                 self._writer.close()
             except Exception:

@@ -128,6 +128,7 @@ class FFmpegVideoFileSource:
         self._size = (w, h)
         fr = v.get("avg_frame_rate") or v.get("r_frame_rate") or "0/0"
         self._fps = self._parse_fps(fr) or 30.0
+        self._num_frames = int(v.get("nb_frames", 0)) or None
 
         self._frame_nbytes = w * h * (1 if self._grayscale else 3)
         self._frame_bytes = bytearray(self._frame_nbytes)

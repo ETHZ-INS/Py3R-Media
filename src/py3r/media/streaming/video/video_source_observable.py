@@ -1,13 +1,13 @@
-import threading
 import reactivex as rx
 from reactivex import operators as ops
 from reactivex.disposable import Disposable
 from reactivex.scheduler import EventLoopScheduler
 
+from py3r.media.types import VideoFrame
 from py3r.media.video import VideoSource
 
 
-def video_source_observable(src: VideoSource, scheduler: EventLoopScheduler):
+def video_source_observable(src: VideoSource, scheduler: EventLoopScheduler = None) -> rx.Observable[VideoFrame]:
     """
     Create an Observable that:
       - opens the VideoSource on subscribe (on `scheduler`)
