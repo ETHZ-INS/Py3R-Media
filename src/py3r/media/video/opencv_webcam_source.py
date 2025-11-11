@@ -17,7 +17,6 @@ class OpenCVWebcamSource:
         self._size = None
         self._fps = None
 
-    def name(self) -> str: return f"webcam:{self._device}"
     def open(self) -> None:
         self._cap = cv2.VideoCapture(self._device, cv2.CAP_ANY)
         if not self._cap.isOpened():
@@ -43,12 +42,13 @@ class OpenCVWebcamSource:
 
     def is_open(self) -> bool: return self._cap is not None and self._cap.isOpened()
     def has_timing(self) -> bool: return True
-    def has_fixed_fps(self) -> bool: return bool(self._fps)
-    def has_fixed_size(self) -> bool: return True
+    def has_size(self) -> bool: return True
+    def has_fps(self) -> bool: return bool(self._fps)
+    def has_num_frames(self) -> bool: return False
     def is_seekable(self) -> bool: return False
 
-    def get_fps(self) -> Optional[float]: return self._fps
     def get_size(self) -> Optional[Tuple[int,int]]: return self._size
+    def get_fps(self) -> Optional[float]: return self._fps
     def get_num_channels(self) -> int: return 1 if self._gray else 3
 
     def set_playback_rate(self, mode: str) -> None: pass

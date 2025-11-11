@@ -40,8 +40,9 @@ class PylonCameraSource:
 
     def is_open(self) -> bool: return self._cam is not None and self._cam.IsOpen()
     def has_timing(self) -> bool: return True  # device timestamp
-    def has_fixed_fps(self) -> bool: return bool(self._fps)
-    def has_fixed_size(self) -> bool: return True
+    def has_size(self) -> bool: return True
+    def has_fps(self) -> bool: return bool(self._fps)
+    def has_num_frames(self) -> bool: return False
     def is_seekable(self) -> bool: return False
 
     def get_fps(self) -> Optional[float]: return self._fps
