@@ -54,7 +54,6 @@ class VideoWriterObserver(rx.Observer[HasImage | np.ndarray]):
         return rx.using(resource_factory, observable_factory)
 
     def _on_next_core(self, frame: HasImage | np.ndarray):
-        # writer is already opened in with_video_writer(...)
         if not self._video_writer.is_open:
             return  # defensive: ignore late items after dispose/close
         try:

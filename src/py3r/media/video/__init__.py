@@ -1,6 +1,8 @@
 from typing import Optional, Tuple, Protocol, runtime_checkable
 
-from py3r.media.types import VideoFrame
+import numpy as np
+
+from py3r.media.types import VideoFrame, HasImage
 
 
 @runtime_checkable
@@ -36,3 +38,13 @@ class VideoSource(Protocol):
         Should block until a frame is available (or timeout).
         """
         ...
+
+
+@runtime_checkable
+class VideoWriter(Protocol):
+    """A minimal interface for writing video frames to a sink."""
+    def open(self) -> None: ...
+    def close(self) -> None: ...
+    def is_open(self) -> bool: ...
+
+    def write(self, frame: HasImage | np.ndarray) -> None: ...
