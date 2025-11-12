@@ -17,22 +17,11 @@ class OpenCVWebcamSource:
         self._size = None
         self._fps = None
 
-    def open(self) -> None:
-        self._cap = cv2.VideoCapture(self._device, cv2.CAP_ANY)
-        if not self._cap.isOpened():
-            raise RuntimeError("Cannot open webcam")
-        if self._requested_size:
-            w,h = self._requested_size
-            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        if self._requested_fps:
-            self._cap.set(cv2.CAP_PROP_FPS, self._requested_fps)
+        self._probe()
 
-        # Probe actual
-        w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self._size = (w,h)
-        self._fps = float(self._cap.get(cv2.CAP_PROP_FPS) or 0) or None
+    def open(self) -> None:
+        self._cap = self._open_camera()
+        self._configure_camera(self._cap)
         self._idx = 0
 
     def close(self) -> None:
@@ -68,3 +57,27 @@ class OpenCVWebcamSource:
                 return f
             if timeout is not None and (time.perf_counter() - t0) > timeout:
                 return None
+
+    def _open_camera(self) -> cv2.VideoCapture:
+        cam = cv2.VideoCapture(self._device, cv2.CAP_ANY)
+        if not cam.isOpened():
+            raise RuntimeError("Cannot open webcam")
+        return cam
+
+    def _configure_camera(self, camera: cv2.VideoCapture) -> None:
+        if self._requested_size:
+            w,h = self._requested_size
+            camera.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        if self._requested_fps:
+            camera.set(cv2.CAP_PROP_FPS, self._requested_fps)
+
+    def _probe(self):
+        cam = self._open_camera()
+        self._configure_camera(cam)
+
+        w = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self._size = (w,h)
+        self._fps = float(cam.get(cv2.CAP_PROP_FPS) or 0) or None
+        cam.release()
