@@ -1,13 +1,12 @@
 import reactivex as rx
-from reactivex import operators as ops
 from reactivex.disposable import Disposable
-from reactivex.scheduler import EventLoopScheduler
+from reactivex.scheduler import CurrentThreadScheduler
 
 from py3r.media.types import VideoFrame
 from py3r.media.video import VideoSource
 
 
-def video_source_observable(src: VideoSource, scheduler: EventLoopScheduler = None) -> rx.Observable[VideoFrame]:
+def video_source_observable(src: VideoSource, scheduler: rx.abc.SchedulerBase = None) -> rx.Observable[VideoFrame]:
     """
     Create an Observable that:
       - opens the VideoSource on subscribe (on `scheduler`)
@@ -25,7 +24,8 @@ def video_source_observable(src: VideoSource, scheduler: EventLoopScheduler = No
         return Disposable(_dispose)
 
     def observable_factory(_res):
-        def _subscribe(observer, __):
+        def _subscribe(observer, scheduler_=None):
+            _scheduler = scheduler or scheduler_ or CurrentThreadScheduler.singleton()
             cancelled = [False]
 
             def tick(_, __=None):
@@ -46,10 +46,10 @@ def video_source_observable(src: VideoSource, scheduler: EventLoopScheduler = No
                     return
 
                 observer.on_next(frame)
-                scheduler.schedule(tick)
+                _scheduler.schedule(tick)
 
             # start the loop on the scheduler
-            scheduler.schedule(tick)
+            _scheduler.schedule(tick)
 
             # cooperative cancellation; close happens via the resource's dispose()
             def _cancel():
@@ -60,7 +60,4 @@ def video_source_observable(src: VideoSource, scheduler: EventLoopScheduler = No
         # Note: _subscribe ignores incoming scheduler and uses our chosen one
         return rx.create(_subscribe)
 
-    # Wrap open/close in `using`, and ensure subscribe/dispose are marshalled
-    return rx.using(resource_factory, observable_factory).pipe(
-        ops.subscribe_on(scheduler)   # subscription & teardown scheduled on `scheduler`
-    )
+    return rx.using(resource_factory, observable_factory)#.pipe(ops.subscribe_on(scheduler))
