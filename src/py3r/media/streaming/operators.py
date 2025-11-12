@@ -8,7 +8,6 @@ from typing import Callable, TypeVar, Optional
 from threading import Lock
 
 import reactivex as rx
-from reactivex import operators as ops
 from reactivex.disposable import Disposable, CompositeDisposable, SerialDisposable
 from reactivex.scheduler import EventLoopScheduler
 
