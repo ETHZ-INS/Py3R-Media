@@ -40,18 +40,19 @@ class PylonCameraSource:
 
     def is_open(self) -> bool: return self._cam is not None and self._cam.IsOpen()
     def has_timing(self) -> bool: return True  # device timestamp
+
     def has_size(self) -> bool: return True
     def has_fps(self) -> bool: return bool(self._fps)
     def has_num_frames(self) -> bool: return False
     def is_seekable(self) -> bool: return False
 
-    def get_fps(self) -> Optional[float]: return self._fps
     def get_size(self) -> Optional[Tuple[int,int]]: return self._size
+    def get_fps(self) -> Optional[float]: return self._fps
     def get_num_channels(self) -> int: return 1 if self._gray else 3
+    def get_num_frames(self) -> Optional[int]: return None
 
     def set_playback_rate(self, mode: str) -> None: pass
     def seek(self, frame_index: int) -> None: pass
-    def enable_grayscale(self, gray: bool) -> None: pass
 
     def read(self, timeout: Optional[float] = None) -> Optional[VideoFrame]:
 

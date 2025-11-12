@@ -48,6 +48,7 @@ class FFmpegVideoFileSource:
     def is_open(self) -> bool: return self._proc is not None and self._proc.poll() is None
 
     def has_timing(self) -> bool: return True
+
     def has_size(self) -> bool: return True
     def has_fps(self) -> bool: return True
     def has_num_frames(self) -> bool: return not self._loop
@@ -70,14 +71,6 @@ class FFmpegVideoFileSource:
         self._discard_n(drop)
         self._idx = drop
         self._t0 = time.perf_counter() - (self._idx / (self._fps or 30.0))
-
-    def enable_grayscale(self, gray: bool) -> None:
-        if gray == self._grayscale:
-            return
-        self._grayscale = gray
-        self._channels = 1 if gray else 3
-        self.close()
-        self._start_proc()
 
     # --- main read with preallocated buffer + readinto ---
     def read(self, timeout: Optional[float] = None) -> Optional[VideoFrame]:
