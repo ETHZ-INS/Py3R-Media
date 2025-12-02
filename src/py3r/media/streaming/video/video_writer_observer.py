@@ -1,4 +1,5 @@
 from threading import Lock
+from typing import Union
 
 import numpy as np
 import reactivex as rx
@@ -23,6 +24,7 @@ class _VideoWriterResource(Disposable):
             if self._closed:
                 return
             self._closed = True
+            # noinspection PyBroadException
             try:
                 self._writer.close()
             except Exception:
@@ -30,7 +32,7 @@ class _VideoWriterResource(Disposable):
 
 # -------- observer focused only on per-item work --------
 
-class VideoWriterObserver(rx.Observer[HasImage | np.ndarray]):
+class VideoWriterObserver(rx.Observer[Union[HasImage, np.ndarray]]):
     """
     Writes frames to a video file. Lifetime handled by rx.using.
     """
@@ -38,7 +40,7 @@ class VideoWriterObserver(rx.Observer[HasImage | np.ndarray]):
         super().__init__()
         self._video_writer = video_writer
 
-    def using(self, upstream: rx.Observable[HasImage | np.ndarray]):
+    def using(self, upstream: rx.Observable[Union[HasImage, np.ndarray]]):
         def resource_factory():
             # Create the teardown resource now; open in observable_factory so we can
             # translate open() failures into an observable error.
@@ -53,7 +55,7 @@ class VideoWriterObserver(rx.Observer[HasImage | np.ndarray]):
 
         return rx.using(resource_factory, observable_factory)
 
-    def _on_next_core(self, frame: HasImage | np.ndarray):
+    def _on_next_core(self, frame: Union[HasImage, np.ndarray]):
         if not self._video_writer.is_open:
             return  # defensive: ignore late items after dispose/close
         try:

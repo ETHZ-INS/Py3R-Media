@@ -199,6 +199,7 @@ def observe_on_bounded(scheduler, maxsize=256, policy="block") -> Callable[[rx.O
                 wdisp.dispose()
                 upstream.dispose()
                 # unblock worker if waiting
+                # noinspection PyBroadException
                 try: q.put_nowait(lambda: None)
                 except Exception: pass
 
@@ -327,7 +328,7 @@ def adaptive_pace(
                             return
 
                         # Sleep for the current period (split into small chunks)
-                        sleep_time = max(period, 1e-6) if period > 0 else 0.001
+                        sleep_time = max(period, 1e-6)
                         deadline = time.perf_counter() + sleep_time
                         while True:
                             if disposed.is_set():
@@ -335,13 +336,12 @@ def adaptive_pace(
                             remaining = deadline - time.perf_counter()
                             if remaining <= 0:
                                 break
-                            time.sleep(min(0.002, remaining))
+                            time.sleep(min(remaining, 0.01))
                 except Exception as e:
-                    import traceback
-                    traceback.print_exc()
+                    observer.on_error(e)
 
             # Schedule the emitter on its own thread
-            emit_disp = scheduler.schedule(lambda *_: emit_loop())
+            emit_disp = scheduler.schedule(lambda _, __: emit_loop())
 
             def dispose():
                 disposed.set()

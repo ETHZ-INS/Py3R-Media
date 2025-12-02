@@ -1,3 +1,5 @@
+from typing import Union
+
 import cv2
 import numpy as np
 
@@ -16,12 +18,12 @@ class CvWindow(Disposable):
     def dispose(self):
         cv2.destroyWindow(self.name)
 
-class OpenCVImshowViewer(rx.Observer[HasImage | np.ndarray]):
+class OpenCVImshowViewer(rx.Observer[Union[HasImage, np.ndarray]]):
     def __init__(self, window_name="Video"):
         super().__init__()
         self.window_name = window_name
 
-    def on_next(self, item: HasImage | np.ndarray):
+    def on_next(self, item: Union[HasImage, np.ndarray]):
         frame = item if isinstance(item, np.ndarray) else item.img
         cv2.imshow(self.window_name, frame)
         cv2.waitKey(1)

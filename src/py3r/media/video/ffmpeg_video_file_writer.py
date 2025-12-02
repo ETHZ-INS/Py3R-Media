@@ -131,14 +131,8 @@ class FFmpegVideoFileWriter:
             return
         try:
             if self._proc and self._proc.stdin:
-                try:
-                    self._proc.stdin.flush()
-                except Exception:
-                    pass
-                try:
-                    self._proc.stdin.close()
-                except Exception:
-                    pass
+                self._proc.stdin.flush()
+                self._proc.stdin.close()
             if self._proc:
                 self._proc.wait(timeout=5.0)
                 # Optional: inspect stderr for errors
@@ -179,21 +173,21 @@ class FFmpegVideoFileWriter:
         if self._grayscale:
             if frame.ndim == 3 and frame.shape[2] == 1:
                 frame = frame.reshape((frame.shape[0], frame.shape[1]))
-            if frame.ndim != 2:
-                raise ValueError(f"Grayscale requires shape (H, W) or (H, W, 1), got {frame.shape}")
-            if frame.shape[0] != self._h or frame.shape[1] != self._w:
-                raise ValueError(f"Frame size mismatch. Expected {(self._h, self._w)}, got {frame.shape[:2]}")
+            elif frame.ndim != 2:
+                raise ValueError(f"Grayscale mode requires shape (H, W) or (H, W, 1), got {frame.shape}")
+            elif frame.shape[0] != self._h or frame.shape[1] != self._w:
+                raise ValueError(f"Frame size mismatch. Expected {(self._h, self._w)}, got {frame.shape}")
         else:
             if frame.ndim != 3 or frame.shape[2] != 3:
-                raise ValueError(f"Color=True requires shape (H, W, 3), got {frame.shape}")
-            if frame.shape[0] != self._h or frame.shape[1] != self._w:
+                raise ValueError(f"Color mode requires shape (H, W, 3), got {frame.shape}")
+            elif frame.shape[0] != self._h or frame.shape[1] != self._w:
                 raise ValueError(f"Frame size mismatch. Expected {(self._h, self._w)}, got {frame.shape[:2]}")
 
         # Ensure C-contiguous
         if not frame.flags["C_CONTIGUOUS"]:
             frame = np.ascontiguousarray(frame)
 
-        mv = memoryview(frame)
+        mv = memoryview(frame)  # type: ignore
 
         # Write raw bytes
         try:

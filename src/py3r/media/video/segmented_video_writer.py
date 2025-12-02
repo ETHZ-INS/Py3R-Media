@@ -1,4 +1,4 @@
-from typing import Optional, Callable
+from typing import Optional, Callable, Union
 
 import numpy as np
 
@@ -23,7 +23,7 @@ class SegmentedVideoWriter:
 
         self._closed = False
         
-    def write(self, frame: HasImage | np.ndarray) -> None:
+    def write(self, frame: Union[HasImage, np.ndarray]) -> None:
         if self._closed:
             raise RuntimeError("Cannot write to a closed SegmentedVideoWriter")
 
