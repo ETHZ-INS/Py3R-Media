@@ -1,22 +1,21 @@
-from __future__ import annotations
-
 import queue
 import threading
 import time
 from concurrent.futures import Future
-from typing import Callable, TypeVar, Optional
-from threading import Lock
+from typing import Callable, TypeVar, Optional, Any
 
 import reactivex as rx
-from reactivex.disposable import Disposable, CompositeDisposable, SerialDisposable
+from reactivex import Observable
+from reactivex.disposable import Disposable, CompositeDisposable, SerialDisposable, ScheduledDisposable, \
+    SingleAssignmentDisposable
 from reactivex.scheduler import EventLoopScheduler
 
 _T = TypeVar("_T")
 
-def notify_future(
+def finally_future(
     future: Future[None],
     *,
-    cancel_on_dispose: bool = True,
+    cancel_on_dispose: bool = False,
 ) -> Callable[[rx.Observable[_T]], rx.Observable[_T]]:
     """
     Operator that wires a Future to the subscription lifecycle.
@@ -28,31 +27,32 @@ def notify_future(
 
     Args:
         future: a concurrent.futures.Future[None] you created.
-        cancel_on_dispose: if True, cancel the future on subscription dispose.
+        cancel_on_dispose: if True, cancel the future if the subscription is disposed before a terminal signal.
 
     Returns:
         A function mapping Observable[T] -> Observable[T].
     """
 
-    lock = Lock()
-
     def _set_ok() -> None:
-        with lock:
-            if not future.done():
-                future.set_result(None)
+        if not future.done():
+            print("Setting future result to None")
+            future.set_result(None)
 
     def _set_err(e: Exception) -> None:
-        with lock:
-            if not future.done():
-                future.set_exception(e)
+        if not future.done():
+            print("Setting future result to exception:", e)
+            future.set_exception(e)
 
     def _cancel() -> None:
-        with lock:
-            if cancel_on_dispose and not future.done():
-                future.cancel()
+        if not future.done():
+            print("Cancelling future")
+            future.cancel()
 
     def _op(source: rx.Observable[_T]) -> rx.Observable[_T]:
         def _subscribe(observer: rx.abc.ObserverBase[_T], scheduler: Optional[rx.abc.SchedulerBase] = None) -> rx.abc.DisposableBase:
+            completed = False
+            error: Optional[Exception] = None
+
             # Wrap downstream so we can catch on_next exceptions
             def _on_next(x: _T) -> None:
                 try:
@@ -63,13 +63,19 @@ def notify_future(
                     _set_err(e)
 
             def _on_error(err: Exception) -> None:
+                print("_notify_future: upstream on_error:", err, "on thread", threading.current_thread().name)
                 try:
+                    nonlocal error
+                    error = err
                     observer.on_error(err)
                 finally:
                     _set_err(err)
 
             def _on_completed() -> None:
+                print("_notify_future: upstream on_completed on thread", threading.current_thread().name)
                 try:
+                    nonlocal completed
+                    completed = True
                     observer.on_completed()
                 finally:
                     _set_ok()
@@ -89,17 +95,23 @@ def notify_future(
                     self._disposed = False
 
                 def dispose(self) -> None:
+                    print("_notify_future: dispose on thread", threading.current_thread().name)
                     if not self._disposed:
                         self._disposed = True
                         try:
                             self._inner.dispose()
                         finally:
-                            _cancel()
+                            if error:
+                                _set_err(error)
+                            elif completed:
+                                _set_ok()
+                            elif cancel_on_dispose:
+                                _cancel()
+                            else:
+                                _set_ok()
 
             return _DisposeWrapper(upstream)
-
         return rx.create(_subscribe)
-
     return _op
 
 
@@ -193,6 +205,59 @@ def observe_on_bounded(scheduler, maxsize=256, policy="block") -> Callable[[rx.O
             return CompositeDisposable(upstream, wdisp, Disposable(dispose))
         return rx.create(_subscribe)
     return _op
+
+
+def subscribe_on_blocking(
+    scheduler: rx.abc.SchedulerBase,
+) -> Callable[[rx.abc.ObservableBase[_T]], rx.abc.ObservableBase[_T]]:
+    def _subscribe_on_blocking(source: rx.abc.ObservableBase[_T]) -> rx.abc.ObservableBase[_T]:
+        """
+        Like subscribe_on, but the outer subscribe() blocks until the
+        subscription has actually been created on the target scheduler.
+
+        - Subscription side effects (resource creation) run on `scheduler`
+        - Unsubscription (dispose) is also scheduled on `scheduler`
+          via ScheduledDisposable
+        - The caller's subscribe(...) does not return until the scheduled
+          subscription action has run.
+        """
+
+        def subscribe(
+            observer: rx.abc.ObserverBase[_T],
+            _: Optional[rx.abc.SchedulerBase] = None,
+        ):
+            m = SingleAssignmentDisposable()
+            d = SerialDisposable()
+            d.disposable = m
+
+            # Gate to signal that the scheduled subscription has run
+            gate = threading.Event()
+
+            def action(
+                sched: rx.abc.SchedulerBase,
+                _state: Optional[Any] = None,
+            ):
+                try:
+                    # Create the real subscription on the scheduler thread
+                    inner_disp = source.subscribe(observer)
+                    # Ensure its disposal also happens on `sched`
+                    d.disposable = ScheduledDisposable(sched, inner_disp)
+                finally:
+                    # Always release the gate, even if subscribe() throws
+                    gate.set()
+
+            # Schedule the subscription on the target scheduler
+            m.disposable = scheduler.schedule(action)
+
+            # Block caller until the above action has executed
+            gate.wait()
+
+            # From the caller's perspective, subscription is now fully established
+            return d
+
+        return Observable(subscribe)
+
+    return _subscribe_on_blocking
 
 
 def adaptive_pace(
