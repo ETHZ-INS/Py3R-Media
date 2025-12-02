@@ -3,13 +3,16 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from py3r.media.types import VideoFrame
+from py3r.media.video import VideoSource
 
 
-class FFmpegVideoFileSource:
-    def __init__(self, path: Path, loop: bool = False, grayscale: bool = True, loglevel: str = "error", pipe_size_bytes: int | None = None):
+class FFmpegVideoFileSource(VideoSource):
+    def __init__(self, path: Path, grayscale: bool = True, loop: bool = False, playback: bool = False,
+                 loglevel: str = "error", pipe_size_bytes: Optional[int] = None):
         self._path = Path(path)
-        self._loop = loop
         self._grayscale = grayscale
+        self._loop = loop
+        self._playback = playback
         self._loglevel = loglevel
         self._proc: Optional[subprocess.Popen] = None
         self._fps: Optional[float] = None
@@ -17,7 +20,6 @@ class FFmpegVideoFileSource:
         self._channels: int = 1 if grayscale else 3
         self._num_frames: Optional[int] = None
 
-        self._mode: str = "original_speed"
         self._idx: int = 0
         self._t0: float = 0.0
 
@@ -38,17 +40,13 @@ class FFmpegVideoFileSource:
 
     def close(self) -> None:
         if self._proc and self._proc.poll() is None:
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=1.0)
-            except Exception:
-                self._proc.kill()
+            self._proc.terminate()
+            self._proc.wait(timeout=1.0)
         self._proc = None
 
     def is_open(self) -> bool: return self._proc is not None and self._proc.poll() is None
 
     def has_timing(self) -> bool: return True
-
     def has_size(self) -> bool: return True
     def has_fps(self) -> bool: return True
     def has_num_frames(self) -> bool: return not self._loop
@@ -58,10 +56,6 @@ class FFmpegVideoFileSource:
     def get_fps(self) -> Optional[float]: return self._fps
     def get_num_channels(self) -> int: return self._channels
     def get_num_frames(self) -> Optional[int]: return self._num_frames
-
-    def set_playback_rate(self, mode: str) -> None:
-        assert mode in {"original_speed", "max_speed"}
-        self._mode = mode
 
     def seek(self, frame_index: int) -> None:
         # Simple robust seek: restart ffmpeg and discard N frames
@@ -76,15 +70,15 @@ class FFmpegVideoFileSource:
     def read(self, timeout: Optional[float] = None) -> Optional[VideoFrame]:
         if not self.is_open():
             return None
-        stdout = self._proc.stdout  # type: ignore
+        stdout = self._proc.stdout
         if stdout is None:
             return None
 
-        ok = self._read_exact_into(stdout, timeout=timeout)
+        ok = self._read_exact_into(stdout, timeout=timeout)  # type: ignore
         if not ok:
             if self._loop:
                 self.seek(0)
-                ok = self._read_exact_into(stdout, timeout=timeout)
+                ok = self._read_exact_into(stdout, timeout=timeout)  # type: ignore
                 if not ok:
                     return None
             else:
@@ -99,7 +93,7 @@ class FFmpegVideoFileSource:
             img = arr.reshape((h, w, 3))  # BGR
 
         ts = None
-        if self._mode == "original_speed" and self._fps:
+        if self._playback and self._fps:
             ts = self._idx / self._fps
             # Pace to original speed
             delay = (self._t0 + ts) - time.perf_counter()
@@ -156,7 +150,7 @@ class FFmpegVideoFileSource:
             try:
                 import fcntl
                 fcntl.fcntl(self._proc.stdout.fileno(), 1031, self._pipe_size_bytes)  # F_SETPIPE_SZ = 1031
-            except Exception:
+            except ImportError:
                 pass
 
     @staticmethod
@@ -167,7 +161,7 @@ class FFmpegVideoFileSource:
             return n/d if d else None
         try:
             return float(frac)
-        except Exception:
+        except ValueError:
             return None
 
     def _read_exact_into(self, stdout, timeout: Optional[float]) -> bool:
@@ -194,5 +188,5 @@ class FFmpegVideoFileSource:
             return
         stdout = self._proc.stdout  # type: ignore
         for _ in range(n):
-            if not self._read_exact_into(stdout, timeout=2.0):
+            if not self._read_exact_into(stdout, timeout=2.0):  # type: ignore
                 break

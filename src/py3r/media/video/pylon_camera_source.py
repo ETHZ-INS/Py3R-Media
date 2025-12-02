@@ -5,10 +5,11 @@ from typing import Optional, Tuple
 from pypylon import pylon
 
 from py3r.media.types import VideoFrame
+from py3r.media.video import VideoSource
 
 
-class PylonCameraSource:
-    def __init__(self, serial: str, config_file: Path | None = None):
+class PylonCameraSource(VideoSource):
+    def __init__(self, serial: str, config_file: Optional[Path] = None):
         self._serial = serial
         self._config_file = config_file
         self._cam = None
@@ -19,7 +20,6 @@ class PylonCameraSource:
 
         self._probe()
 
-    def name(self) -> str: return f"basler:{self._serial or 'first'}"
     def open(self) -> None:
         self._cam = self._open_camera()
         self._configure_camera(self._cam)
@@ -31,16 +31,12 @@ class PylonCameraSource:
 
     def close(self) -> None:
         if self._cam:
-            try:
-                self._cam.StopGrabbing()
-                self._cam.Close()
-            except Exception:
-                pass
+            self._cam.StopGrabbing()
+            self._cam.Close()
         self._cam = None
 
     def is_open(self) -> bool: return self._cam is not None and self._cam.IsOpen()
     def has_timing(self) -> bool: return True  # device timestamp
-
     def has_size(self) -> bool: return True
     def has_fps(self) -> bool: return bool(self._fps)
     def has_num_frames(self) -> bool: return False
@@ -66,7 +62,6 @@ class PylonCameraSource:
         print(img.shape)
         ts_device_ns = getattr(result, "TimeStamp", None)
         ts = (ts_device_ns / 1e9) if ts_device_ns else time.perf_counter()
-        # debayer if needed
         f = VideoFrame(img, self._idx, ts)
         self._idx += 1
         result.Release()

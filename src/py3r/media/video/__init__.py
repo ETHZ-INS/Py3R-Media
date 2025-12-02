@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Protocol, runtime_checkable
+from typing import Optional, Tuple, Protocol, runtime_checkable, Union
 
 import numpy as np
 
@@ -22,13 +22,10 @@ class VideoSource(Protocol):
     def is_seekable(self) -> bool: ...
 
     def get_size(self) -> Optional[Tuple[int, int]]: ...     # (width, height) or None if variable
-    def get_fps(self) -> Optional[float]: ...
+    def get_fps(self) -> Optional[float]: ...                 # or None if live/unknown
     def get_num_channels(self) -> int: ...                   # 1 or 3 (or more for special devices)
     def get_num_frames(self) -> Optional[int]: ...               # or None if live/unknown
 
-    # --- control (optional; no-ops for sources that don’t support them)
-    def set_playback_rate(self, mode: str) -> None: ...
-    # mode in {"original_speed", "max_speed"} (files/images). For live cams, ignored.
     def seek(self, frame_index: int) -> None: ...
 
     # --- acquisition
@@ -47,4 +44,4 @@ class VideoWriter(Protocol):
     def close(self) -> None: ...
     def is_open(self) -> bool: ...
 
-    def write(self, frame: HasImage | np.ndarray) -> None: ...
+    def write(self, frame: Union[HasImage, np.ndarray]) -> None: ...
