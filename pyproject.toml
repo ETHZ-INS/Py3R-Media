@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py3r_media"
-version = "0.1.11"
+version = "0.1.12"
 authors = [
   { name="Marcel Schmutz", email="mschmut@ethz.ch" },
 ]
 description = "Lightweight library for camera / video handling in the ETH Zurich 3R Hub"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.8"
 license = "MIT"
 license-files = ["LICEN[CS]E*"]
 dependencies = [

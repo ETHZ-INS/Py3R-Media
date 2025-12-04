@@ -35,17 +35,14 @@ def finally_future(
 
     def _set_ok() -> None:
         if not future.done():
-            print("Setting future result to None")
             future.set_result(None)
 
     def _set_err(e: Exception) -> None:
         if not future.done():
-            print("Setting future result to exception:", e)
             future.set_exception(e)
 
     def _cancel() -> None:
         if not future.done():
-            print("Cancelling future")
             future.cancel()
 
     def _op(source: rx.Observable[_T]) -> rx.Observable[_T]:
@@ -63,7 +60,6 @@ def finally_future(
                     _set_err(e)
 
             def _on_error(err: Exception) -> None:
-                print("_notify_future: upstream on_error:", err, "on thread", threading.current_thread().name)
                 try:
                     nonlocal error
                     error = err
@@ -72,7 +68,6 @@ def finally_future(
                     _set_err(err)
 
             def _on_completed() -> None:
-                print("_notify_future: upstream on_completed on thread", threading.current_thread().name)
                 try:
                     nonlocal completed
                     completed = True
@@ -95,7 +90,6 @@ def finally_future(
                     self._disposed = False
 
                 def dispose(self) -> None:
-                    print("_notify_future: dispose on thread", threading.current_thread().name)
                     if not self._disposed:
                         self._disposed = True
                         try:
