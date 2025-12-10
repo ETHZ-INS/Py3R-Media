@@ -9,15 +9,15 @@ from reactivex.disposable import SerialDisposable, CompositeDisposable, Disposab
 _T = TypeVar("_T")
 
 
-def observe_on_bounded(scheduler, maxsize=256, policy="block") -> Callable[[rx.Observable[_T]], rx.Observable[_T]]:
+def observe_on_bounded(scheduler, maxsize=256, policy="block") -> Callable[[rx.abc.ObservableBase[_T]], rx.Observable[_T]]:
     """
     Like observe_on, but with a bounded internal queue.
     policy: "block" | "drop_newest" | "drop_oldest"
     """
     assert policy in ("block", "drop_newest", "drop_oldest")
 
-    def _op(source: rx.Observable[_T]) -> rx.Observable[_T]:
-        def _subscribe(observer: rx.abc.ObserverBase[_T], _scheduler: Optional[rx.abc.SchedulerBase] = None) -> rx.abc.DisposableBase:
+    def _op(source: rx.abc.ObservableBase[_T]) -> rx.Observable[_T]:
+        def _subscribe(observer: rx.abc.ObserverBase[_T], _scheduler: Optional[rx.abc.SchedulerBase] = None) -> CompositeDisposable:
             q = queue.Queue(maxsize=maxsize)
             stop = threading.Event()
             wdisp = SerialDisposable()

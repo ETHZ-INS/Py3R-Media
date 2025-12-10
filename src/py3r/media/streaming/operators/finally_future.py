@@ -12,7 +12,7 @@ def finally_future(
     future: Future[None],
     *,
     cancel_on_dispose: bool = False,
-) -> Callable[[rx.Observable[_T]], rx.Observable[_T]]:
+) -> Callable[[rx.abc.ObservableBase[_T]], rx.abc.ObservableBase[_T]]:
     """
     Operator that wires a Future to the subscription lifecycle.
 
@@ -41,8 +41,8 @@ def finally_future(
         if not future.done():
             future.cancel()
 
-    def _op(source: rx.Observable[_T]) -> rx.Observable[_T]:
-        def _subscribe(observer: rx.abc.ObserverBase[_T], scheduler: Optional[rx.abc.SchedulerBase] = None) -> rx.abc.DisposableBase:
+    def _op(source: rx.abc.ObservableBase[_T]) -> rx.Observable[_T]:
+        def _subscribe(observer: rx.abc.ObserverBase[_T], scheduler: Optional[rx.abc.SchedulerBase] = None) -> Disposable:
             completed = False
             error: Optional[Exception] = None
 

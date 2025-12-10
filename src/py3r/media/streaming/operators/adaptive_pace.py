@@ -14,9 +14,9 @@ def adaptive_pace(
     initial_interval: Optional[float] = None,
     learn_rate: float = 0.1,
     scheduler: Optional[rx.abc.SchedulerBase] = None,
-) -> Callable[[rx.Observable[_T]], rx.Observable[_T]]:
-    def _op(source: rx.Observable[_T]) -> rx.Observable[_T]:
-        def _subscribe(observer: rx.abc.ObserverBase[_T], scheduler_: Optional[rx.abc.SchedulerBase] = None) -> rx.abc.DisposableBase:
+) -> Callable[[rx.abc.ObservableBase[_T]], rx.Observable[_T]]:
+    def _op(source: rx.abc.ObservableBase[_T]) -> rx.Observable[_T]:
+        def _subscribe(observer: rx.abc.ObserverBase[_T], scheduler_: Optional[rx.abc.SchedulerBase] = None) -> Disposable:
             _scheduler = scheduler or scheduler_ or TimeoutScheduler.singleton()
 
             q: queue.Queue[_T] = queue.Queue()

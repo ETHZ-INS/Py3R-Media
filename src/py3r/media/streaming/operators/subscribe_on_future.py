@@ -22,7 +22,7 @@ class FutureScheduledDisposable(Disposable):
                 return
             self._is_disposed = True
 
-            def action(sched, _state: Any = None):
+            def action(_sched, _state: Any = None):
                 try:
                     self._disp.dispose()
                 except BaseException as exc:
@@ -43,14 +43,14 @@ def subscribe_on_future(
     scheduler: rx.abc.SchedulerBase,
     subscribed: Future[None] = Future(),
     disposed: Future[None] = Future()
-) -> Callable[[rx.abc.ObservableBase[_T]], rx.abc.ObservableBase[_T]]:
+) -> Callable[[rx.abc.ObservableBase[_T]], rx.Observable[_T]]:
 
-    def _op(source: rx.abc.ObservableBase[_T]) -> rx.abc.ObservableBase[_T]:
+    def _op(source: rx.abc.ObservableBase[_T]) -> rx.Observable[_T]:
 
         def subscribe(
             observer: rx.abc.ObserverBase[_T],
             _: Optional[rx.abc.SchedulerBase] = None,
-        ):
+        ) -> rx.abc.DisposableBase:
             m = SingleAssignmentDisposable()
             d = SerialDisposable()
             d.disposable = m
