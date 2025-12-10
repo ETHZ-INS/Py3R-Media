@@ -7,46 +7,12 @@ from reactivex.disposable import Disposable, SingleAssignmentDisposable, SerialD
 from typing import Any, Optional, TypeVar, Callable
 
 
-class SubscriptionSignal:
-    """
-    Exposes two Futures:
-
-      - subscribed: completes when the subscription has been established
-                    on the target scheduler.
-
-      - disposed:   completes when the scheduled disposal has finished
-                    on the target scheduler.
-
-    You can use .result(timeout=...) or .add_done_callback(...) on both.
-    """
-
-    def __init__(self) -> None:
-        self.subscribed: Future[None] = Future()
-        self.disposed: Future[None] = Future()
-
-    def _on_subscribed(self) -> None:
-        if not self.subscribed.done():
-            self.subscribed.set_result(None)
-
-    def _on_subscribe_error(self, exc: BaseException) -> None:
-        if not self.subscribed.done():
-            self.subscribed.set_exception(exc)
-
-    def _on_disposed(self) -> None:
-        if not self.disposed.done():
-            self.disposed.set_result(None)
-
-    def _on_dispose_error(self, exc: BaseException) -> None:
-        if not self.disposed.done():
-            self.disposed.set_exception(exc)
-
-
-class SignalScheduledDisposable(Disposable):
-    def __init__(self, scheduler, disp, signal: SubscriptionSignal):
+class FutureScheduledDisposable(Disposable):
+    def __init__(self, scheduler, disp, disposed: Future[None]):
         super().__init__()
         self._scheduler = scheduler
         self._disp = disp
-        self._signal = signal
+        self._disposed = disposed
         self._is_disposed = False
         self._lock = threading.Lock()
 
@@ -61,19 +27,22 @@ class SignalScheduledDisposable(Disposable):
                     self._disp.dispose()
                 except BaseException as exc:
                     # disposal failed → surface as exception on the Future
-                    self._signal._on_dispose_error(exc)
+                    if not self._disposed.done():
+                        self._disposed.set_exception(exc)
                     raise
                 else:
-                    self._signal._on_disposed()
+                    if not self._disposed.done():
+                        self._disposed.set_result(None)
 
             self._scheduler.schedule(action)
 
 
 _T = TypeVar("_T")
 
-def subscribe_on_signaled(
+def subscribe_on_future(
     scheduler: rx.abc.SchedulerBase,
-    signal: SubscriptionSignal,
+    subscribed: Future[None] = Future(),
+    disposed: Future[None] = Future()
 ) -> Callable[[rx.abc.ObservableBase[_T]], rx.abc.ObservableBase[_T]]:
 
     def _op(source: rx.abc.ObservableBase[_T]) -> rx.abc.ObservableBase[_T]:
@@ -95,12 +64,14 @@ def subscribe_on_signaled(
                     inner_disp = source.subscribe(observer)
                 except BaseException as exc:
                     # subscription failed
-                    signal._on_subscribe_error(exc)
+                    if not subscribed.done():
+                        subscribed.set_exception(exc)
                     raise
                 else:
                     # subscription succeeded; disposal will be signaled separately
-                    d.disposable = SignalScheduledDisposable(sched, inner_disp, signal)
-                    signal._on_subscribed()
+                    d.disposable = FutureScheduledDisposable(sched, inner_disp, disposed)
+                    if not subscribed.done():
+                        subscribed.set_result(None)
 
             m.disposable = scheduler.schedule(action)
             return d
