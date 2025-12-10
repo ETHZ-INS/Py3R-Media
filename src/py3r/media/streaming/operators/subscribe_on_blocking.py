@@ -12,7 +12,7 @@ _T = TypeVar("_T")
 def subscribe_on_blocking(
     scheduler: rx.abc.SchedulerBase,
 ) -> Callable[[rx.abc.ObservableBase[_T]], rx.abc.ObservableBase[_T]]:
-    def _subscribe_on_blocking(source: rx.abc.ObservableBase[_T]) -> rx.abc.ObservableBase[_T]:
+    def _subscribe_on_blocking(source: rx.abc.ObservableBase[_T]) -> rx.Observable[_T]:
         """
         Like subscribe_on, but the outer subscribe() blocks until the
         subscription has actually been created on the target scheduler.
