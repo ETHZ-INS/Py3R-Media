@@ -33,7 +33,7 @@ def video_source_observable(src: VideoSource, scheduler: rx.abc.SchedulerBase = 
                     return
 
                 try:
-                    frame = src.read(timeout=0.5)
+                    frame = src.read(timeout=5.0)
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
