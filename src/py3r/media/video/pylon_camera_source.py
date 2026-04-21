@@ -8,6 +8,14 @@ from py3r.media.types import VideoFrame
 from py3r.media.video import VideoSource
 
 
+class GrabFailedError(BaseException):
+    """The camera returned a result whose GrabSucceeded() flag is False."""
+
+
+class GrabTimeoutError(BaseException):
+    """RetrieveResult returned without a frame within the given timeout."""
+
+
 class PylonCameraSource(VideoSource):
     def __init__(self, serial: str, config_file: Optional[Path] = None):
         self._serial = serial
@@ -50,21 +58,55 @@ class PylonCameraSource(VideoSource):
     def set_playback_rate(self, mode: str) -> None: pass
     def seek(self, frame_index: int) -> None: pass
 
-    def read(self, timeout: Optional[float] = None) -> Optional[VideoFrame]:
+    def read(self, timeout: Optional[float] = None) -> VideoFrame:
+        """
+        Read the next frame from the camera.
 
+        Returns a VideoFrame on success.
+
+        Raises
+        ------
+        GrabTimeoutError
+            The camera did not deliver a frame within *timeout* seconds.
+            This is **retryable** — the camera is still running.
+        GrabFailedError
+            The SDK returned a result but ``GrabSucceeded()`` was False (e.g.
+            incomplete / dropped frame due to CPU or network load).
+            This is also **retryable** — individual dropped frames are normal.
+        RuntimeError
+            The camera is not open or has stopped grabbing.  This is fatal.
+        """
         if not self._cam or not self._cam.IsGrabbing():
-            return None
-        grab_timeout = int((timeout or 0.5) * 1000)
-        result = self._cam.RetrieveResult(grab_timeout, pylon.TimeoutHandling_ThrowException)
-        if not result or not result.GrabSucceeded():
-            return None
-        img = result.Array  # numpy view
-        print(img.shape)
+            raise RuntimeError("Camera is not open or has stopped grabbing")
+
+        grab_timeout_ms = int((timeout or 0.5) * 1000)
+
+        # Use TimeoutHandling_Return so the SDK gives us back a None/invalid
+        # result on timeout rather than raising its own exception, which lets
+        # us translate it into our typed hierarchy cleanly.
+        result = self._cam.RetrieveResult(grab_timeout_ms, pylon.TimeoutHandling_Return)
+
+        if result is None:
+            raise GrabTimeoutError(
+                f"No frame received within {timeout or 0.5:.3f}s"
+            )
+
+        if not result.GrabSucceeded():
+            err_code = result.GetErrorCode()
+            err_desc = result.GetErrorDescription()
+            result.Release()
+            raise GrabFailedError(
+                f"Grab failed (code={err_code:#010x}): {err_desc}"
+            )
+
+        img = result.Array  # numpy view — copy before Release
+        img = img.copy()
         ts_device_ns = getattr(result, "TimeStamp", None)
         ts = (ts_device_ns / 1e9) if ts_device_ns else time.perf_counter()
+        result.Release()
+
         f = VideoFrame(img, self._idx, ts)
         self._idx += 1
-        result.Release()
         return f
 
     def _open_camera(self) -> pylon.InstantCamera:
