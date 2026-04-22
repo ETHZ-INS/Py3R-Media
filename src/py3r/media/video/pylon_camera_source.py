@@ -102,7 +102,7 @@ class PylonCameraSource(VideoSource):
         img = result.Array  # numpy view — copy before Release
         img = img.copy()
         ts_device_ns = getattr(result, "TimeStamp", None)
-        ts = (ts_device_ns / 1e9) if ts_device_ns else time.perf_counter()
+        ts = (ts_device_ns / 125000000) if ts_device_ns else time.perf_counter()
         result.Release()
 
         f = VideoFrame(img, self._idx, ts)
