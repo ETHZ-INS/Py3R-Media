@@ -26,6 +26,9 @@ class PylonCameraSource(VideoSource):
         self._fps = None
         self._gray = False
 
+        self._tick_frequency = 125_000_000
+        self._has_hw_timestamp = False
+
         self._probe()
 
     def open(self) -> None:
@@ -79,7 +82,7 @@ class PylonCameraSource(VideoSource):
         if not self._cam or not self._cam.IsGrabbing():
             raise RuntimeError("Camera is not open or has stopped grabbing")
 
-        grab_timeout_ms = int((timeout or 0.5) * 1000)
+        grab_timeout_ms = 500 if timeout is None else int(timeout * 1000)
 
         # Use TimeoutHandling_Return so the SDK gives us back a None/invalid
         # result on timeout rather than raising its own exception, which lets
@@ -101,8 +104,8 @@ class PylonCameraSource(VideoSource):
 
         img = result.Array  # numpy view — copy before Release
         img = img.copy()
-        ts_device_ns = getattr(result, "TimeStamp", None)
-        ts = (ts_device_ns / 125000000) if ts_device_ns else time.perf_counter()
+        ts_device_ns = result.TimeStamp if self._has_hw_timestamp else None
+        ts = (ts_device_ns / self._tick_frequency) if ts_device_ns is not None else time.perf_counter()  # type: ignore[operator]
         result.Release()
 
         f = VideoFrame(img, self._idx, ts)
@@ -137,18 +140,22 @@ class PylonCameraSource(VideoSource):
 
     def _probe(self):
         cam = self._open_camera()
-        self._configure_camera(cam)
+        try:
+            self._configure_camera(cam)
 
-        width = cam.Width.GetValue()
-        height = cam.Height.GetValue()
-        self._size = (width, height)
+            if hasattr(cam, "GevTimestampTickFrequency"):
+                self._tick_frequency = cam.GevTimestampTickFrequency.GetValue()
+                self._has_hw_timestamp = True
 
-        if hasattr(cam, "AcquisitionFrameRateAbs"):
-            self._fps = cam.AcquisitionFrameRateAbs.GetValue() or 30.0
-        else:
-            self._fps = 30.0
+            width = cam.Width.GetValue()
+            height = cam.Height.GetValue()
+            self._size = (width, height)
 
-        if cam.PixelFormat == "Mono8":
-            self._gray = True
-        else:
-            self._gray = False
+            if hasattr(cam, "AcquisitionFrameRateAbs"):
+                self._fps = cam.AcquisitionFrameRateAbs.GetValue() or 30.0
+            else:
+                self._fps = 30.0
+
+            self._gray = cam.PixelFormat.GetValue() == "Mono8"
+        finally:
+            cam.Close()
