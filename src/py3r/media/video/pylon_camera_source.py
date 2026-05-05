@@ -2,7 +2,7 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-from pypylon import pylon
+from pypylon import genicam, pylon
 
 from py3r.media.types import VideoFrame
 from py3r.media.video import VideoSource
@@ -135,25 +135,29 @@ class PylonCameraSource(VideoSource):
             camera.AcquisitionFrameRateAbs.SetValue(30.0)
 
         frame_size = 9000 if jumbo_frames else 1500
-        if hasattr(camera, "GevSCPSPacketSize"):
+        try:
             camera.GevSCPSPacketSize.SetValue(frame_size)
+        except genicam.LogicalErrorException:
+            pass
 
     def _probe(self):
         cam = self._open_camera()
         try:
             self._configure_camera(cam)
 
-            if hasattr(cam, "GevTimestampTickFrequency"):
+            try:
                 self._tick_frequency = cam.GevTimestampTickFrequency.GetValue()
                 self._has_hw_timestamp = True
+            except genicam.LogicalErrorException:
+                pass
 
             width = cam.Width.GetValue()
             height = cam.Height.GetValue()
             self._size = (width, height)
 
-            if hasattr(cam, "AcquisitionFrameRateAbs"):
+            try:
                 self._fps = cam.AcquisitionFrameRateAbs.GetValue() or 30.0
-            else:
+            except genicam.LogicalErrorException:
                 self._fps = 30.0
 
             self._gray = cam.PixelFormat.GetValue() == "Mono8"
