@@ -14,15 +14,15 @@ def adaptive_pace(
     initial_interval: Optional[float] = None,
     learn_rate: float = 0.1,
     scheduler: Optional[rx.abc.SchedulerBase] = None,
+    _poll: float = 0.01,
 ) -> Callable[[rx.abc.ObservableBase[_T]], rx.Observable[_T]]:
     def _op(source: rx.abc.ObservableBase[_T]) -> rx.Observable[_T]:
         def _subscribe(observer: rx.abc.ObserverBase[_T], scheduler_: Optional[rx.abc.SchedulerBase] = None) -> Disposable:
             _scheduler = scheduler or scheduler_ or TimeoutScheduler.singleton()
 
-            q: queue.Queue[_T] = queue.Queue()
+            q: queue.Queue = queue.Queue()
             last_time: Optional[float] = None
             period: float = initial_interval or 0.0
-            stopped = threading.Event()
             disposed = threading.Event()
 
             def update_interval(now: float):
@@ -37,14 +37,14 @@ def adaptive_pace(
 
             def on_next(x: _T):
                 update_interval(time.perf_counter())
-                q.put(x)
+                q.put(("next", x))
 
             def on_error(err: Exception):
-                stopped.set()
-                observer.on_error(err)
+                # Route through queue so buffered on_next items are delivered first.
+                q.put(("error", err))
 
             def on_completed():
-                stopped.set()
+                q.put(("completed", None))
 
             src_disp = source.subscribe(
                 on_next,
@@ -54,28 +54,31 @@ def adaptive_pace(
             )
 
             def emit_loop():
-                nonlocal period
                 try:
                     while not disposed.is_set():
                         try:
-                            item = q.get(timeout=0.01)
-                            observer.on_next(item)
+                            kind, value = q.get(timeout=_poll)
                         except queue.Empty:
-                            pass
+                            continue
 
-                        if stopped.is_set() and q.empty():
+                        if kind == "next":
+                            observer.on_next(value)
+                        elif kind == "error":
+                            observer.on_error(value)
+                            return
+                        else:  # completed
                             observer.on_completed()
                             return
 
+                        # Pace: sleep for the learned interval, waking frequently
+                        # so we can respond to dispose() quickly.
                         sleep_time = max(period, 1e-6)
                         deadline = time.perf_counter() + sleep_time
-                        while True:
-                            if disposed.is_set():
-                                return
+                        while not disposed.is_set():
                             remaining = deadline - time.perf_counter()
                             if remaining <= 0:
                                 break
-                            time.sleep(min(remaining, 0.01))
+                            time.sleep(min(remaining, _poll))
                 except Exception as e:
                     observer.on_error(e)
 

@@ -9,6 +9,8 @@ from reactivex import Observable
 from reactivex.abc import ObserverBase
 from reactivex.disposable import Disposable
 
+from py3r.media.types import FatalReadError
+
 log = logging.getLogger(__name__)
 
 TItem = TypeVar("TItem")
@@ -69,6 +71,10 @@ def reader_observable(
                     try:
                         item = reader.read(read_timeout_seconds)
                         consecutive_errors = 0  # reset on success
+                    except FatalReadError as ex:
+                        if not stop.is_set():
+                            observer.on_error(ex)
+                        return
                     except Exception as ex:
                         if stop.is_set():
                             return

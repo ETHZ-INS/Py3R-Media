@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py3r_media"
-version = "0.3.1"
+version = "0.5.0"
 authors = [
   { name="Marcel Schmutz", email="mschmut@ethz.ch" },
 ]
@@ -17,8 +17,20 @@ dependencies = [
     "numpy >= 2",
     "opencv-python >= 4",
     "reactivex >= 4.0.0",
+    "av >= 13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest >= 8",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src/"]
 include = ["py3r.media*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "hardware: requires physical capture hardware (webcam, Pylon camera, …)",
+]
