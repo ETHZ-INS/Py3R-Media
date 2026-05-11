@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Protocol, Tuple
 
 from pypylon import genicam, pylon
 
@@ -17,26 +17,58 @@ class GrabTimeoutError(BaseException):
 
 
 class PylonCameraSource(VideoSource):
-    def __init__(self, serial: str, config_file: Optional[Path] = None):
+    """
+    Pull-based Basler camera source via pypylon.
+
+    Parameters
+    ----------
+    serial : str
+        Camera serial number used to locate the device via TlFactory.
+    config_file : Path | None
+        PFS feature-persistence file to load after opening.  Errors are
+        swallowed so that emulated cameras or mismatched configs don't crash
+        at startup.
+    camera_factory : CameraFactory | None
+        If provided, replaces the real ``TlFactory`` device enumeration.
+        Called with the serial number and must return an already-opened
+        camera object::
+
+            camera_factory(serial) -> camera
+
+        Use this in unit tests to inject a fake camera without needing
+        physical hardware or a pypylon installation.
+    """
+
+    class CameraFactory(Protocol):
+        def __call__(self, serial: str) -> Any: ...
+
+    def __init__(
+        self,
+        serial: str,
+        config_file: Optional[Path] = None,
+        *,
+        camera_factory: Optional[CameraFactory] = None,
+    ):
         self._serial = serial
         self._config_file = config_file
+        self._camera_factory = camera_factory
         self._cam = None
         self._idx = 0
-        self._size = None
-        self._fps = None
+        self._size: Optional[Tuple[int, int]] = None
+        self._fps: Optional[float] = None
         self._gray = False
-
-        self._tick_frequency = 125_000_000
-        self._has_hw_timestamp = False
+        self._tick_frequency: int = 1_000_000_000  # default: assume ns until probed
 
         self._probe()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def open(self) -> None:
         self._cam = self._open_camera()
         self._configure_camera(self._cam)
-
         self._cam.MaxNumBuffer = 30
-
         self._cam.StartGrabbing(pylon.GrabStrategy_OneByOne)
         self._idx = 0
 
@@ -46,14 +78,16 @@ class PylonCameraSource(VideoSource):
             self._cam.Close()
         self._cam = None
 
-    def is_open(self) -> bool: return self._cam is not None and self._cam.IsOpen()
-    def has_timing(self) -> bool: return True  # device timestamp
-    def has_size(self) -> bool: return True
-    def has_fps(self) -> bool: return bool(self._fps)
+    def is_open(self) -> bool:
+        return self._cam is not None and self._cam.IsOpen()
+
+    def has_timing(self) -> bool: return True
+    def has_size(self) -> bool: return self._size is not None
+    def has_fps(self) -> bool: return self._fps is not None
     def has_num_frames(self) -> bool: return False
     def is_seekable(self) -> bool: return False
 
-    def get_size(self) -> Optional[Tuple[int,int]]: return self._size
+    def get_size(self) -> Optional[Tuple[int, int]]: return self._size
     def get_fps(self) -> Optional[float]: return self._fps
     def get_num_channels(self) -> int: return 1 if self._gray else 3
     def get_num_frames(self) -> Optional[int]: return None
@@ -65,101 +99,113 @@ class PylonCameraSource(VideoSource):
         """
         Read the next frame from the camera.
 
-        Returns a VideoFrame on success.
-
         Raises
         ------
         GrabTimeoutError
-            The camera did not deliver a frame within *timeout* seconds.
-            This is **retryable** — the camera is still running.
+            No frame within *timeout* seconds — retryable.
         GrabFailedError
-            The SDK returned a result but ``GrabSucceeded()`` was False (e.g.
-            incomplete / dropped frame due to CPU or network load).
-            This is also **retryable** — individual dropped frames are normal.
+            SDK returned GrabSucceeded()==False (dropped frame) — retryable.
         RuntimeError
-            The camera is not open or has stopped grabbing.  This is fatal.
+            Camera not open or stopped grabbing — fatal.
         """
         if not self._cam or not self._cam.IsGrabbing():
             raise RuntimeError("Camera is not open or has stopped grabbing")
 
         grab_timeout_ms = 500 if timeout is None else int(timeout * 1000)
 
-        # Use TimeoutHandling_Return so the SDK gives us back a None/invalid
-        # result on timeout rather than raising its own exception, which lets
-        # us translate it into our typed hierarchy cleanly.
+        # TimeoutHandling_Return gives back None on timeout instead of raising,
+        # so we can translate it into our typed exception hierarchy cleanly.
         result = self._cam.RetrieveResult(grab_timeout_ms, pylon.TimeoutHandling_Return)
 
-        if result is None:
-            raise GrabTimeoutError(
-                f"No frame received within {timeout or 0.5:.3f}s"
-            )
+        # TimeoutHandling_Return yields an empty (invalid) GrabResult on timeout,
+        # not None — use __bool__ / IsValid() rather than identity check.
+        if not result:
+            raise GrabTimeoutError(f"No frame received within {timeout or 0.5:.3f}s")
 
         if not result.GrabSucceeded():
             err_code = result.GetErrorCode()
             err_desc = result.GetErrorDescription()
             result.Release()
-            raise GrabFailedError(
-                f"Grab failed (code={err_code:#010x}): {err_desc}"
-            )
+            raise GrabFailedError(f"Grab failed (code={err_code:#010x}): {err_desc}")
 
-        img = result.Array  # numpy view — copy before Release
-        img = img.copy()
-        ts_device_ns = result.TimeStamp if self._has_hw_timestamp else None
-        ts = (ts_device_ns / self._tick_frequency) if ts_device_ns is not None else time.perf_counter()  # type: ignore[operator]
+        img = result.Array.copy()  # copy before Release
+
+        # BlockID is the hardware frame counter — gaps are immediately visible
+        # to downstream pipelines.  Fall back to our own counter if unavailable.
+        block_id = getattr(result, "BlockID", None)
+        frame_index = int(block_id) if block_id is not None else self._idx
+
+        # Device timestamp in hardware ticks; divide by tick frequency for seconds.
+        ts_device_ticks = getattr(result, "TimeStamp", None)
+        ts = (ts_device_ticks / self._tick_frequency) if ts_device_ticks else time.perf_counter()
+
         result.Release()
 
-        f = VideoFrame(img, self._idx, ts)
         self._idx += 1
-        return f
+        return VideoFrame(img, frame_index, ts)
 
-    def _open_camera(self) -> pylon.InstantCamera:
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _open_camera(self):
+        if self._camera_factory is not None:
+            return self._camera_factory(self._serial)
+
         tl_factory = pylon.TlFactory.GetInstance()
         devices = tl_factory.EnumerateDevices()
         if not devices:
             raise RuntimeError("No Basler camera found")
-        dev = next((dev for dev in devices if dev.GetSerialNumber() == self._serial), None)
+        dev = next((d for d in devices if d.GetSerialNumber() == self._serial), None)
         if dev is None:
             raise RuntimeError(f"Basler camera with serial '{self._serial}' not found")
         cam = pylon.InstantCamera(tl_factory.CreateDevice(dev))
         cam.Open()
         return cam
 
-    def _configure_camera(self, camera: pylon.InstantCamera):
-        jumbo_frames = False
-
+    def _configure_camera(self, camera) -> None:
         if self._config_file is not None:
-            pylon.FeaturePersistence.Load(str(self._config_file), camera.GetNodeMap(), True)
-        elif self._serial.startswith("0815-"):
-            camera.Width.SetValue(1280)
-            camera.Height.SetValue(1024)
-            camera.AcquisitionFrameRateAbs.SetValue(30.0)
-
-        frame_size = 9000 if jumbo_frames else 1500
-        try:
-            camera.GevSCPSPacketSize.SetValue(frame_size)
-        except genicam.LogicalErrorException:
-            pass
-
-    def _probe(self):
-        cam = self._open_camera()
-        try:
-            self._configure_camera(cam)
-
             try:
-                self._tick_frequency = cam.GevTimestampTickFrequency.GetValue()
-                self._has_hw_timestamp = True
-            except genicam.LogicalErrorException:
+                pylon.FeaturePersistence.Load(
+                    str(self._config_file), camera.GetNodeMap(), True
+                )
+            except Exception:
+                # Config files made for a real GigE camera will fail on the
+                # emulator (and vice-versa) because device-specific nodes don't
+                # exist. Swallow so the camera is still usable.
                 pass
 
-            width = cam.Width.GetValue()
-            height = cam.Height.GetValue()
-            self._size = (width, height)
+        # GigE packet size — silently ignored on USB / emulated cameras.
+        try:
+            camera.GevSCPSPacketSize.SetValue(1500)
+        except (genicam.LogicalErrorException, AttributeError):
+            pass
 
+    def _probe(self) -> None:
+        try:
+            cam = self._open_camera()
             try:
-                self._fps = cam.AcquisitionFrameRateAbs.GetValue() or 30.0
-            except genicam.LogicalErrorException:
-                self._fps = 30.0
+                self._configure_camera(cam)
 
-            self._gray = cam.PixelFormat.GetValue() == "Mono8"
-        finally:
-            cam.Close()
+                try:
+                    self._tick_frequency = int(cam.GevTimestampTickFrequency.GetValue())
+                except (genicam.LogicalErrorException, AttributeError):
+                    pass  # USB / emulated cameras — keep default 1_000_000_000
+
+                self._size = (int(cam.Width.GetValue()), int(cam.Height.GetValue()))
+
+                try:
+                    fps = cam.AcquisitionFrameRateAbs.GetValue()
+                    self._fps = float(fps) if fps else 30.0
+                except (genicam.LogicalErrorException, AttributeError):
+                    self._fps = 30.0
+
+                try:
+                    self._gray = cam.PixelFormat.GetValue() == "Mono8"
+                except (genicam.LogicalErrorException, AttributeError):
+                    self._gray = False
+            finally:
+                cam.Close()
+        except Exception:
+            # Soft-fail: caller can still open() later.
+            pass

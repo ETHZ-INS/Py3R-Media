@@ -4,6 +4,39 @@ from typing import Tuple, runtime_checkable, Protocol, Union
 import numpy as np
 
 
+# ---------------------------------------------------------------------------
+# Read error hierarchy
+# ---------------------------------------------------------------------------
+
+class ReadError(Exception):
+    """Base class for errors raised by IReader.read()."""
+
+
+class FatalReadError(ReadError):
+    """
+    An unrecoverable read failure.  ``reader_observable`` will forward this
+    immediately as ``on_error`` without consulting ``max_consecutive_errors``.
+
+    All other exceptions (including plain ``ReadError`` subclasses) are treated
+    as retryable by default — the source will be retried up to
+    ``max_consecutive_errors`` times before the stream is terminated.
+
+    Use this only when retrying is known to be pointless or harmful (e.g. the
+    camera has been physically disconnected and the source has already set an
+    internal flag so that every subsequent ``read()`` would also fail
+    immediately).  In most cases it is better to let the consecutive-error
+    threshold handle termination naturally.
+    """
+
+
+class GrabFailedError(ReadError):
+    """The camera returned a result whose GrabSucceeded() flag is False."""
+
+
+class GrabTimeoutError(ReadError):
+    """RetrieveResult returned without a frame within the given timeout."""
+
+
 @runtime_checkable
 class HasImage(Protocol):
     @property

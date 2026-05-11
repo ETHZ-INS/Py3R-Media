@@ -41,9 +41,15 @@ _T = TypeVar("_T")
 
 def subscribe_on_future(
     scheduler: rx.abc.SchedulerBase,
-    subscribed: Future[None] = Future(),
-    disposed: Future[None] = Future()
+    subscribed: Optional[Future[None]] = None,
+    disposed: Optional[Future[None]] = None,
 ) -> Callable[[rx.abc.ObservableBase[_T]], rx.Observable[_T]]:
+    # Create fresh Futures here (not in the signature) to avoid the
+    # mutable-default-argument trap where all callers share the same object.
+    if subscribed is None:
+        subscribed = Future()
+    if disposed is None:
+        disposed = Future()
 
     def _op(source: rx.abc.ObservableBase[_T]) -> rx.Observable[_T]:
 
@@ -56,19 +62,18 @@ def subscribe_on_future(
             d.disposable = m
 
             def action(
-                sched: rx.abc.SchedulerBase,
-                _state: Optional[Any] = None,
+                    sched: rx.abc.SchedulerBase,
+                    _state: Optional[Any] = None,
             ):
                 try:
-                    # subscribe upstream on this scheduler
                     inner_disp = source.subscribe(observer)
                 except BaseException as exc:
-                    # subscription failed
                     if not subscribed.done():
                         subscribed.set_exception(exc)
                     raise
                 else:
-                    # subscription succeeded; disposal will be signaled separately
+                    # Subscription fully established — signal now so callers that
+                    # blocked on subscribed.result() know it is safe to start producing.
                     d.disposable = FutureScheduledDisposable(sched, inner_disp, disposed)
                     if not subscribed.done():
                         subscribed.set_result(None)

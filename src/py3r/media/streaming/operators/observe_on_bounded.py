@@ -14,6 +14,7 @@ def observe_on_bounded(
     maxsize: int = 256,
     policy: str = "block",
     timeout: float = 0.1,
+    _worker_poll: float = 0.05,
 ) -> Callable[[rx.Observable[_T]], rx.Observable[_T]]:
     """
     Like observe_on, but with a bounded internal queue.
@@ -89,7 +90,7 @@ def observe_on_bounded(
 
                 try:
                     try:
-                        action = q.get(timeout=0.05)
+                        action = q.get(timeout=_worker_poll)
                     except queue.Empty:
                         if not disposed.is_set():
                             worker_disp.disposable = scheduler.schedule(worker)

@@ -2,3 +2,4 @@ numpy>=2
 opencv-python>=4
 reactivex>=4.0.0
 pypylon>=4.0.0
+av>=13
