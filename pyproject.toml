@@ -11,7 +11,7 @@ authors = [
 description = "Lightweight library for video and audio handling in the ETH Zurich 3R Hub"
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "MIT"}
+license = "MIT"
 license-files = ["LICEN[CS]E*"]
 dependencies = [
     "numpy >= 2",
