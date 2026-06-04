@@ -332,6 +332,133 @@ class TestQuality:
         assert len(decoded) == 1
 
 
+# ---------------------------------------------------------------------------
+# TestResolveEncoderConfig — pure unit tests, no file I/O
+# ---------------------------------------------------------------------------
+
+class TestResolveEncoderConfig:
+    @pytest.mark.parametrize("quality,expected_crf", [
+        ("very_low", "36"),
+        ("low", "32"),
+        ("medium", "28"),
+        ("high", "22"),
+        ("very_high", "18"),
+    ])
+    def test_lossy_crf(self, quality, expected_crf):
+        cfg = resolve_encoder_config(quality)
+        assert cfg.options["crf"] == expected_crf
+
+    @pytest.mark.parametrize("quality,expected_preset", [
+        ("very_low", "ultrafast"),
+        ("low", "ultrafast"),
+        ("medium", "veryfast"),
+        ("high", "medium"),
+        ("very_high", "fast"),
+    ])
+    def test_lossy_preset(self, quality, expected_preset):
+        cfg = resolve_encoder_config(quality)
+        assert cfg.options["preset"] == expected_preset
+
+    def test_lossy_uses_libx264(self):
+        for q in ("very_low", "low", "medium", "high", "very_high"):
+            assert resolve_encoder_config(q).codec == "libx264"
+
+    def test_lossy_uses_yuv420p(self):
+        for q in ("very_low", "low", "medium", "high", "very_high"):
+            assert resolve_encoder_config(q).pix_fmt == "yuv420p"
+
+    def test_lossy_no_full_range(self):
+        for q in ("very_low", "low", "medium", "high", "very_high"):
+            assert not resolve_encoder_config(q).full_range
+
+    def test_lossless_gray_codec(self):
+        assert resolve_encoder_config("lossless", grayscale=True).codec == "libx264"
+
+    def test_lossless_gray_pix_fmt(self):
+        assert resolve_encoder_config("lossless", grayscale=True).pix_fmt == "gray"
+
+    def test_lossless_gray_full_range(self):
+        assert resolve_encoder_config("lossless", grayscale=True).full_range is True
+
+    def test_lossless_color_codec(self):
+        assert resolve_encoder_config("lossless", grayscale=False).codec == "libx264rgb"
+
+    def test_lossless_color_pix_fmt(self):
+        assert resolve_encoder_config("lossless", grayscale=False).pix_fmt == "bgr24"
+
+    def test_lossless_color_no_full_range(self):
+        assert resolve_encoder_config("lossless", grayscale=False).full_range is False
+
+    def test_lossless_crf_zero(self):
+        assert resolve_encoder_config("lossless").options["crf"] == "0"
+
+    def test_extra_options_merged(self):
+        cfg = resolve_encoder_config("medium", extra_options={"tune": "grain"})
+        assert cfg.options["tune"] == "grain"
+        assert cfg.options["crf"] == "28"  # preset value still present
+
+    def test_extra_options_override_preset(self):
+        cfg = resolve_encoder_config("medium", extra_options={"crf": "10"})
+        assert cfg.options["crf"] == "10"
+
+    def test_extra_options_do_not_mutate_table(self):
+        resolve_encoder_config("medium", extra_options={"crf": "99"})
+        assert resolve_encoder_config("medium").options["crf"] == "28"
+
+    def test_unknown_quality_raises(self):
+        with pytest.raises(ValueError, match="Unknown quality"):
+            resolve_encoder_config("ultra")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# TestPyAVStreamWriter — core class with explicit EncoderConfig
+# ---------------------------------------------------------------------------
+
+class TestPyAVStreamWriter:
+    def _make(self, path, *, grayscale=True, **cfg_kw) -> PyAVStreamWriter:
+        cfg = EncoderConfig(
+            codec="libx264",
+            pix_fmt="gray" if grayscale else "yuv420p",
+            options={"crf": "28", "preset": "ultrafast"},
+            **cfg_kw,
+        )
+        return PyAVStreamWriter(path, size=(W, H), fps=FPS, encoder_config=cfg,
+                                grayscale=grayscale)
+
+    def test_not_open_before_open(self, tmp_path):
+        assert not self._make(tmp_path / "out.mp4").is_open
+
+    def test_is_open_after_open(self, tmp_path):
+        w = self._make(tmp_path / "out.mp4")
+        w.open()
+        assert w.is_open
+        w.close()
+
+    def test_write_raises_when_not_open(self, tmp_path):
+        w = self._make(tmp_path / "out.mp4")
+        with pytest.raises(RuntimeError):
+            w.write(_gray(1)[0])
+
+    def test_roundtrip_with_custom_config(self, tmp_path):
+        """PyAVStreamWriter with a hand-built EncoderConfig produces a valid file."""
+        path = tmp_path / "out.mp4"
+        with self._make(path) as w:
+            for f in _gray(5):
+                w.write(f)
+        assert len(_read_frames(path, "gray")) == 5
+
+    def test_custom_codec_color(self, tmp_path):
+        """Use libx264 with yuv420p for a color clip via EncoderConfig."""
+        path = tmp_path / "out.mp4"
+        cfg = EncoderConfig(codec="libx264", pix_fmt="yuv420p",
+                            options={"crf": "28", "preset": "ultrafast"})
+        with PyAVStreamWriter(path, size=(W, H), fps=FPS,
+                               encoder_config=cfg, grayscale=False) as w:
+            for f in _color(3):
+                w.write(f)
+        assert len(_read_frames(path, "bgr24")) == 3
+
+
 
 
 
