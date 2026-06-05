@@ -3,141 +3,179 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Dict, Literal, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Literal,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import av
 import numpy as np
 
 from py3r.media.types import HasImage
 
-QualityName = Literal["very_low", "low", "medium", "high", "very_high", "lossless"]
+
+InputPixFmt = Literal[
+    "gray",
+    "bgr24",
+    "rgb24",
+    "bgra",
+    "rgba",
+]
 
 
 # ---------------------------------------------------------------------------
 # Encoder configuration
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class EncoderConfig:
     """
-    Raw encoder configuration for :class:`PyAVStreamWriter`.
+    Encoder / stream-side configuration for PyAVStreamWriter.
+
+    This describes how frames are encoded, not the format of the NumPy arrays
+    passed to write().
 
     Parameters
     ----------
-    codec : str
-        libav codec name (e.g. ``"libx264"``, ``"libx264rgb"``,
-        ``"libx265"``, ``"libvpx-vp9"``).
-    pix_fmt : str
-        Output pixel format (e.g. ``"yuv420p"``, ``"gray"``, ``"bgr24"``).
-    options : dict[str, str]
-        Codec private options passed verbatim to the encoder
-        (e.g. ``{"crf": "28", "preset": "veryfast"}``).
-    full_range : bool
-        When ``True``, signals ``AVCOL_RANGE_JPEG`` (full / PC range) on the
-        stream's codec context.  Required for lossless grayscale to prevent
-        decoders applying limited-range rescaling (Y∈[16,235] → [0,255]).
+    codec:
+        FFmpeg / libav codec name, for example "libx264", "libx264rgb",
+        "libx265", "libvpx-vp9".
+    pix_fmt:
+        Pixel format configured on the output stream / encoder, for example
+        "yuv420p", "gray", "bgr24".
+    options:
+        Codec private options passed to the encoder, for example
+        {"crf": "22", "preset": "medium"}.
+    codec_context_attrs:
+        Extra attributes set on stream.codec_context before encoding starts.
+        Useful for things like color_range, thread_count, color_primaries, etc.
     """
 
     codec: str
     pix_fmt: str
-    options: Dict[str, str] = field(default_factory=dict)
-    full_range: bool = False
+    options: Mapping[str, str] = field(default_factory=dict)
+    codec_context_attrs: Mapping[str, Any] = field(default_factory=dict)
 
 
-_QUALITY_TABLE: Dict[str, Dict[str, str]] = {
-    "very_low":  {"crf": "36", "preset": "ultrafast"},
-    "low":       {"crf": "32", "preset": "ultrafast"},
-    "medium":    {"crf": "28", "preset": "veryfast"},
-    "high":      {"crf": "22", "preset": "medium"},
-    "very_high": {"crf": "18", "preset": "fast"},
-    "lossless":  {"crf": "0",  "preset": "veryslow"},
+# ---------------------------------------------------------------------------
+# Frame validation / normalization
+# ---------------------------------------------------------------------------
+
+_CHANNELS_BY_INPUT_PIX_FMT: Dict[str, int] = {
+    "bgr24": 3,
+    "rgb24": 3,
+    "bgra": 4,
+    "rgba": 4,
 }
 
 
-def resolve_encoder_config(
-    quality: QualityName,
-    grayscale: bool = False,
-    extra_options: Optional[Dict[str, str]] = None,
-) -> EncoderConfig:
+def _as_ndarray(frame: Union[HasImage, np.ndarray]) -> np.ndarray:
+    return frame if isinstance(frame, np.ndarray) else frame.img
+
+
+def _validate_and_normalize_frame(
+    img: np.ndarray,
+    *,
+    input_pix_fmt: str,
+    expected_size: Tuple[int, int],
+) -> np.ndarray:
     """
-    Map a *quality* name and color mode to a concrete :class:`EncoderConfig`.
+    Validate the frame according to the writer's input contract.
 
-    +------------+-----+-----------+------------------+
-    | quality    | crf | preset    | codec            |
-    +============+=====+===========+==================+
-    | very_low   |  36 | ultrafast | libx264          |
-    | low        |  32 | ultrafast | libx264          |
-    | medium     |  28 | veryfast  | libx264          |
-    | high       |  22 | medium    | libx264          |
-    | very_high  |  18 | fast      | libx264          |
-    | lossless   |   0 | veryslow  | libx264 / x264rgb|
-    +------------+-----+-----------+------------------+
-
-    Parameters
-    ----------
-    quality : QualityName
-        One of the keys in the table above.
-    grayscale : bool
-        Selects ``gray`` pixel format and ``libx264`` with full-range signalling
-        for lossless, or ``yuv420p`` / ``bgr24`` otherwise.
-    extra_options : dict[str, str] | None
-        Additional codec options merged on top of the quality preset.
-
-    Returns
-    -------
-    EncoderConfig
+    expected_size is (width, height), matching the writer constructor.
     """
-    if quality not in _QUALITY_TABLE:
+    expected_w, expected_h = expected_size
+
+    if img.dtype != np.uint8:
+        raise ValueError(f"Expected dtype=uint8, got {img.dtype}")
+
+    if img.shape[0] != expected_h or img.shape[1] != expected_w:
         raise ValueError(
-            f"Unknown quality {quality!r}. "
-            f"Valid values: {list(_QUALITY_TABLE)}"
+            f"Frame size mismatch: expected ({expected_h}, {expected_w}), "
+            f"got {img.shape[:2]}"
         )
 
-    if quality == "lossless":
-        if grayscale:
-            codec, pix_fmt, full_range = "libx264", "gray", True
-        else:
-            codec, pix_fmt, full_range = "libx264rgb", "bgr24", False
+    if input_pix_fmt == "gray":
+        if img.ndim == 3 and img.shape[2] == 1:
+            img = img.reshape(img.shape[0], img.shape[1])
+
+        if img.ndim != 2:
+            raise ValueError(
+                "input_pix_fmt='gray' expects shape (H, W) or (H, W, 1), "
+                f"got {img.shape}"
+            )
+
+    elif input_pix_fmt in _CHANNELS_BY_INPUT_PIX_FMT:
+        expected_channels = _CHANNELS_BY_INPUT_PIX_FMT[input_pix_fmt]
+
+        if img.ndim != 3 or img.shape[2] != expected_channels:
+            raise ValueError(
+                f"input_pix_fmt={input_pix_fmt!r} expects shape "
+                f"(H, W, {expected_channels}), got {img.shape}"
+            )
+
     else:
-        codec, pix_fmt, full_range = "libx264", "yuv420p", False
+        # Unknown / advanced PyAV pixel format.
+        # We still check dtype and size, but leave shape validation to PyAV.
+        if img.ndim < 2:
+            raise ValueError(
+                f"Expected at least 2D image data for {input_pix_fmt!r}, "
+                f"got {img.shape}"
+            )
 
-    options = dict(_QUALITY_TABLE[quality])
-    if extra_options:
-        options.update(extra_options)
+    if not img.flags["C_CONTIGUOUS"]:
+        img = np.ascontiguousarray(img)
 
-    return EncoderConfig(codec=codec, pix_fmt=pix_fmt, options=options, full_range=full_range)
+    return img
 
 
 # ---------------------------------------------------------------------------
 # Core writer
 # ---------------------------------------------------------------------------
 
-class PyAVStreamWriter:
+class PyAVVideoFileWriter:
     """
-    Write video frames to a file using a caller-supplied :class:`EncoderConfig`.
+    Minimal video writer around a PyAV output container and video stream.
 
-    This is the low-level class.  It does not know about quality names or
-    presets — those are resolved before construction.  Any codec and pixel
-    format supported by the installed libav build can be used.
+    The writer owns three separate concepts:
+
+    1. Input frame format:
+       input_pix_fmt describes the NumPy arrays passed to write().
+
+    2. Encoder configuration:
+       encoder_config describes the PyAV stream / codec.
+
+    3. Lifecycle:
+       open(), write(), close().
 
     Parameters
     ----------
-    path : str | Path
-        Output file path.  The container format is inferred from the extension.
-    size : (width, height)
-        Frame dimensions in pixels.
-    fps : float
-        Nominal frame-rate.
-    encoder_config : EncoderConfig
-        Codec name, pixel format, and encoder options.
-    grayscale : bool
-        If ``True``, :meth:`write` expects ``(H, W)`` / ``(H, W, 1)`` uint8
-        arrays.  If ``False``, it expects ``(H, W, 3)`` uint8 BGR arrays.
-
-    Notes
-    -----
-    * ``close()`` flushes the encoder and finalises container headers — always
-      call it (or use the writer as a context manager).
+    path:
+        Output file path. Container format is normally inferred from extension.
+    size:
+        Frame size as (width, height).
+    fps:
+        Nominal frame rate.
+    encoder_config:
+        EncoderConfig describing codec, output pixel format, codec options,
+        and codec context attributes.
+    input_pix_fmt:
+        Pixel format of frames passed to write(), for example "bgr24",
+        "rgb24", or "gray".
+    container_format:
+        Optional explicit container format passed to av.open(..., format=...).
+        Usually unnecessary if path has a normal extension.
+    open_options:
+        Extra keyword arguments passed to av.open(..., mode="w", **open_options).
+    configure_stream:
+        Optional callback called after the stream has been created and basic
+        attributes have been set, but before any frame is encoded.
     """
 
     def __init__(
@@ -147,60 +185,86 @@ class PyAVStreamWriter:
         fps: float,
         encoder_config: EncoderConfig,
         *,
-        grayscale: bool = False,
+        input_pix_fmt: str = "bgr24",
+        container_format: Optional[str] = None,
+        open_options: Optional[Mapping[str, Any]] = None,
+        configure_stream: Optional[Callable[[Any], None]] = None,
     ) -> None:
         self._path = Path(path)
-        self._w, self._h = int(size[0]), int(size[1])
+        self._w = int(size[0])
+        self._h = int(size[1])
         self._fps = float(fps)
+
+        if self._w <= 0 or self._h <= 0:
+            raise ValueError(f"Frame size must be positive, got {(self._w, self._h)}")
+
+        if self._fps <= 0:
+            raise ValueError(f"fps must be positive, got {self._fps}")
+
         self._encoder_config = encoder_config
-        self._grayscale = bool(grayscale)
+        self._input_pix_fmt = input_pix_fmt
+        self._container_format = container_format
+        self._open_options = dict(open_options or {})
+        self._configure_stream = configure_stream
 
         self._container: Optional[av.container.OutputContainer] = None
         self._stream = None
-        self._frame_count: int = 0
-        self._closed: bool = True
+        self._frame_count = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def open(self) -> None:
-        if not self._closed:
+        if self.is_open:
             return
 
         cfg = self._encoder_config
-        self._container = av.open(str(self._path), mode="w")
 
-        rate = Fraction(self._fps).limit_denominator(1001)
-        stream = self._container.add_stream(cfg.codec, rate=rate)
-        stream.width = self._w
-        stream.height = self._h
-        stream.pix_fmt = cfg.pix_fmt
-        stream.options = dict(cfg.options)
+        open_kwargs = dict(self._open_options)
+        if self._container_format is not None:
+            open_kwargs["format"] = self._container_format
 
-        if cfg.full_range:
-            try:
-                stream.codec_context.color_range = 2  # AVCOL_RANGE_JPEG
-            except Exception:
-                pass
+        container = av.open(str(self._path), mode="w", **open_kwargs)
 
+        try:
+            rate = Fraction(self._fps).limit_denominator(1001)
+            stream = container.add_stream(cfg.codec, rate=rate)
+
+            stream.width = self._w
+            stream.height = self._h
+            stream.pix_fmt = cfg.pix_fmt
+            stream.options = dict(cfg.options)
+
+            for name, value in cfg.codec_context_attrs.items():
+                setattr(stream.codec_context, name, value)
+
+            if self._configure_stream is not None:
+                self._configure_stream(stream)
+
+        except Exception:
+            container.close()
+            raise
+
+        self._container = container
         self._stream = stream
         self._frame_count = 0
-        self._closed = False
 
     def close(self) -> None:
-        if self._closed:
+        if not self.is_open:
             return
+
         try:
             if self._stream is not None:
                 for packet in self._stream.encode(None):
                     self._container.mux(packet)  # type: ignore[union-attr]
+
             if self._container is not None:
                 self._container.close()
+
         finally:
             self._stream = None
             self._container = None
-            self._closed = True
 
     def __enter__(self) -> "PyAVStreamWriter":
         self.open()
@@ -215,138 +279,80 @@ class PyAVStreamWriter:
 
     def write(self, frame: Union[HasImage, np.ndarray]) -> None:
         """
-        Write a single frame.
+        Write one frame.
 
-        Parameters
-        ----------
-        frame : numpy.ndarray or HasImage
-            * Color (``grayscale=False``): shape ``(H, W, 3)``, dtype ``uint8``,
-              **BGR** channel order (OpenCV-native).
-            * Grayscale (``grayscale=True``): shape ``(H, W)`` or ``(H, W, 1)``,
-              dtype ``uint8``.
+        The frame must match input_pix_fmt, not encoder_config.pix_fmt.
 
-        Raises
-        ------
-        RuntimeError
-            Writer has not been opened.
-        ValueError
-            Frame dtype, shape, or channel count does not match the writer
-            configuration.
+        Examples
+        --------
+        input_pix_fmt="bgr24":
+            frame shape must be (H, W, 3), dtype uint8, BGR channel order.
+
+        input_pix_fmt="rgb24":
+            frame shape must be (H, W, 3), dtype uint8, RGB channel order.
+
+        input_pix_fmt="gray":
+            frame shape must be (H, W) or (H, W, 1), dtype uint8.
         """
-        if self._closed or self._stream is None:
+        if self._container is None or self._stream is None:
             raise RuntimeError("PyAVStreamWriter is not open — call .open() first.")
 
-        img = frame if isinstance(frame, np.ndarray) else frame.img
+        img = _as_ndarray(frame)
+        img = _validate_and_normalize_frame(
+            img,
+            input_pix_fmt=self._input_pix_fmt,
+            expected_size=(self._w, self._h),
+        )
 
-        if img.dtype != np.uint8:
-            raise ValueError(f"Expected dtype=uint8, got {img.dtype}")
-
-        if self._grayscale:
-            if img.ndim == 3 and img.shape[2] == 1:
-                img = img.reshape(img.shape[0], img.shape[1])
-            if img.ndim != 2:
-                raise ValueError(
-                    f"Grayscale mode expects shape (H, W) or (H, W, 1), got {img.shape}"
-                )
-            src_fmt = "gray"
-        else:
-            if img.ndim != 3 or img.shape[2] != 3:
-                raise ValueError(
-                    f"Color mode expects shape (H, W, 3), got {img.shape}"
-                )
-            src_fmt = "bgr24"
-
-        if img.shape[0] != self._h or img.shape[1] != self._w:
-            raise ValueError(
-                f"Frame size mismatch: expected ({self._h}, {self._w}), "
-                f"got {img.shape[:2]}"
-            )
-
-        if not img.flags["C_CONTIGUOUS"]:
-            img = np.ascontiguousarray(img)
-
-        av_frame = av.VideoFrame.from_ndarray(img, format=src_fmt)
+        av_frame = av.VideoFrame.from_ndarray(img, format=self._input_pix_fmt)
         av_frame.pts = self._frame_count
         self._frame_count += 1
 
-        enc_fmt: str = self._stream.codec_context.pix_fmt
-        if av_frame.format.name != enc_fmt:
-            av_frame = av_frame.reformat(format=enc_fmt)
+        target_pix_fmt = self._stream.codec_context.pix_fmt
+        if target_pix_fmt and av_frame.format.name != target_pix_fmt:
+            av_frame = av_frame.reformat(format=target_pix_fmt)
 
         for packet in self._stream.encode(av_frame):
-            self._container.mux(packet)  # type: ignore[union-attr]
+            self._container.mux(packet)
 
     # ------------------------------------------------------------------
-    # Properties
+    # PyAV accessors
     # ------------------------------------------------------------------
 
     @property
-    def is_open(self) -> bool:
-        """``True`` if the writer has been opened and not yet closed."""
-        return not self._closed
+    def container(self) -> av.container.OutputContainer:
+        """
+        The underlying PyAV output container.
 
+        Available only while the writer is open.
+        """
+        if self._container is None:
+            raise RuntimeError("Container is only available while writer is open.")
+        return self._container
 
-# ---------------------------------------------------------------------------
-# Convenience wrapper
-# ---------------------------------------------------------------------------
+    @property
+    def stream(self):
+        """
+        The underlying PyAV stream.
 
-class PyAVVideoFileWriter:
-    """
-    Convenience wrapper around :class:`PyAVStreamWriter` that resolves a
-    *quality* name to an :class:`EncoderConfig` via :func:`resolve_encoder_config`.
-
-    For full control over the codec and options (e.g. a different codec or
-    custom options not representable as a quality name), construct a
-    :class:`PyAVStreamWriter` directly with a hand-built :class:`EncoderConfig`.
-
-    Parameters
-    ----------
-    path : str | Path
-        Output file path.  The container format is inferred from the extension
-        (e.g. ``.mp4``, ``.mkv``, ``.avi``).
-    size : (width, height)
-        Frame dimensions in pixels.
-    fps : float
-        Nominal frame-rate.
-    grayscale : bool
-        If ``True``, :meth:`write` expects ``(H, W)`` / ``(H, W, 1)`` uint8
-        arrays.  If ``False``, it expects ``(H, W, 3)`` uint8 BGR arrays.
-    quality : QualityName
-        Resolved by :func:`resolve_encoder_config`.
-    extra_options : dict[str, str] | None
-        Additional codec options merged on top of the quality preset.
-    """
-
-    def __init__(
-        self,
-        path: Union[Path, str],
-        size: Tuple[int, int],
-        fps: float,
-        *,
-        grayscale: bool = False,
-        quality: QualityName = "medium",
-        extra_options: Optional[Dict[str, str]] = None,
-    ) -> None:
-        cfg = resolve_encoder_config(quality, grayscale, extra_options)
-        self._writer = PyAVStreamWriter(path, size, fps, cfg, grayscale=grayscale)
-
-    def open(self) -> None:
-        self._writer.open()
-
-    def close(self) -> None:
-        self._writer.close()
-
-    def __enter__(self) -> "PyAVVideoFileWriter":
-        self._writer.open()
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self._writer.close()
-
-    def write(self, frame: Union[HasImage, np.ndarray]) -> None:
-        self._writer.write(frame)
+        Available only while the writer is open.
+        """
+        if self._stream is None:
+            raise RuntimeError("Stream is only available while writer is open.")
+        return self._stream
 
     @property
     def is_open(self) -> bool:
-        return self._writer.is_open
+        return self._container is not None
 
+    @property
+    def frame_count(self) -> int:
+        return self._frame_count
+
+    @property
+    def input_pix_fmt(self) -> str:
+        return self._input_pix_fmt
+
+    @property
+    def encoder_config(self) -> EncoderConfig:
+        return self._encoder_config
