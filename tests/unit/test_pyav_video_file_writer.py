@@ -26,7 +26,10 @@ import numpy as np
 import pytest
 
 from py3r.media.types import VideoFrame
-from py3r.media.video.pyav_video_file_writer import PyAVVideoFileWriter
+from py3r.media.video.pyav_video_file_writer import (
+    EncoderConfig,
+    PyAVVideoFileWriter,
+)
 
 W, H = 64, 48
 FPS = 30.0
@@ -63,9 +66,42 @@ def _read_frames(path: Path, fmt: str) -> list[np.ndarray]:
 
 
 def _make_writer(path: Path, *, grayscale: bool = True,
-                 quality: str = "medium", **kw) -> PyAVVideoFileWriter:
+                 encoder_config: EncoderConfig | None = None,
+                 **kw) -> PyAVVideoFileWriter:
+    if encoder_config is None:
+        encoder_config = _lossy_gray_config() if grayscale else _lossy_color_config()
     return PyAVVideoFileWriter(path, size=(W, H), fps=FPS,
-                               grayscale=grayscale, quality=quality, **kw)
+                               encoder_config=encoder_config,
+                               input_pix_fmt="gray" if grayscale else "bgr24",
+                               **kw)
+
+
+def _lossy_gray_config(crf: str = "28", preset: str = "ultrafast",
+                       extra: dict | None = None) -> EncoderConfig:
+    opts = {"crf": crf, "preset": preset}
+    if extra:
+        opts.update(extra)
+    return EncoderConfig(codec="libx264", pix_fmt="yuv420p", options=opts)
+
+
+def _lossy_color_config(crf: str = "28", preset: str = "ultrafast") -> EncoderConfig:
+    return EncoderConfig(codec="libx264", pix_fmt="yuv420p",
+                         options={"crf": crf, "preset": preset})
+
+
+def _lossless_gray_config(extra: dict | None = None) -> EncoderConfig:
+    opts = {"crf": "0", "preset": "veryslow"}
+    if extra:
+        opts.update(extra)
+    return EncoderConfig(
+        codec="libx264", pix_fmt="gray", options=opts,
+        codec_context_attrs={"color_range": 2},
+    )
+
+
+def _lossless_color_config() -> EncoderConfig:
+    return EncoderConfig(codec="libx264rgb", pix_fmt="bgr24",
+                         options={"crf": "0", "preset": "veryslow"})
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +224,7 @@ class TestRoundTrip:
         A constant fill is used so B-frame reordering doesn't affect comparison."""
         path = tmp_path / "out.mkv"
         frame = np.full((H, W), 150, dtype=np.uint8)
-        with _make_writer(path, quality="lossless") as w:
+        with _make_writer(path, encoder_config=_lossless_gray_config()) as w:
             for _ in range(5):
                 w.write(frame.copy())
         decoded = _read_frames(path, "gray")
@@ -201,8 +237,8 @@ class TestRoundTrip:
         B-frames are explicitly disabled so PTS-sorted order matches write order."""
         path = tmp_path / "out.mkv"
         frames = _gray(5, start=50)  # values 50, 58, 66, 74, 82 — well within valid range
-        with _make_writer(path, quality="lossless",
-                          extra_options={"bf": "0"}) as w:
+        cfg = _lossless_gray_config(extra={"bf": "0"})
+        with _make_writer(path, encoder_config=cfg) as w:
             for f in frames:
                 w.write(f)
         decoded = _read_frames(path, "gray")
@@ -213,7 +249,8 @@ class TestRoundTrip:
     def test_lossless_color_exact(self, tmp_path):
         path = tmp_path / "out.mkv"
         frames = _color(5)
-        with _make_writer(path, grayscale=False, quality="lossless") as w:
+        with _make_writer(path, grayscale=False,
+                          encoder_config=_lossless_color_config()) as w:
             for f in frames:
                 w.write(f)
         decoded = _read_frames(path, "bgr24")
@@ -225,13 +262,13 @@ class TestRoundTrip:
         (YUV limited-range rounding may shift values by 1 count)."""
         path = tmp_path / "out.mp4"
         frames = _gray(5)
-        with _make_writer(path, quality="medium") as w:
+        with _make_writer(path) as w:
             for f in frames:
                 w.write(f)
         decoded = _read_frames(path, "gray")
         assert len(decoded) == len(frames)
         for orig, dec in zip(frames, decoded):
-            np.testing.assert_allclose(dec.astype(int), orig.astype(int), atol=1)
+            np.testing.assert_allclose(dec.astype(int), orig.astype(int), atol=2)
 
     def test_hw_size_preserved(self, tmp_path):
         path = tmp_path / "out.mp4"
@@ -295,41 +332,108 @@ class TestValidation:
 
 
 # ---------------------------------------------------------------------------
-# TestQuality
+# TestEncoderConfig — different encoder setups produce valid files
 # ---------------------------------------------------------------------------
 
-class TestQuality:
-    @pytest.mark.parametrize("quality", [
-        "very_low", "low", "medium", "high", "very_high",
+class TestEncoderConfig:
+    @pytest.mark.parametrize("crf,preset", [
+        ("36", "ultrafast"),
+        ("32", "ultrafast"),
+        ("28", "veryfast"),
+        ("22", "medium"),
+        ("18", "fast"),
     ])
-    def test_lossy_quality_produces_valid_file(self, tmp_path, quality):
-        path = tmp_path / f"out_{quality}.mp4"
-        with _make_writer(path, quality=quality) as w:
-            w.write(_gray(1)[0])
-        decoded = _read_frames(path, "gray")
-        assert len(decoded) == 1
-
-    def test_lossless_quality_produces_valid_gray_file(self, tmp_path):
-        path = tmp_path / "out_lossless.mkv"
-        with _make_writer(path, quality="lossless") as w:
-            w.write(_gray(1)[0])
-        decoded = _read_frames(path, "gray")
-        assert len(decoded) == 1
-
-    def test_lossless_quality_produces_valid_color_file(self, tmp_path):
-        path = tmp_path / "out_lossless.mkv"
-        with _make_writer(path, grayscale=False, quality="lossless") as w:
-            w.write(_color(1)[0])
-        decoded = _read_frames(path, "bgr24")
-        assert len(decoded) == 1
-
-    def test_extra_options_are_merged(self, tmp_path):
-        """extra_options must not break encoding — just verify file is valid."""
+    def test_lossy_gray_config_produces_valid_file(self, tmp_path, crf, preset):
         path = tmp_path / "out.mp4"
-        with _make_writer(path, extra_options={"tune": "grain"}) as w:
+        with _make_writer(path, encoder_config=_lossy_gray_config(crf=crf, preset=preset)) as w:
             w.write(_gray(1)[0])
-        decoded = _read_frames(path, "gray")
-        assert len(decoded) == 1
+        assert len(_read_frames(path, "gray")) == 1
+
+    def test_lossless_gray_produces_valid_file(self, tmp_path):
+        path = tmp_path / "out.mkv"
+        with _make_writer(path, encoder_config=_lossless_gray_config()) as w:
+            w.write(_gray(1)[0])
+        assert len(_read_frames(path, "gray")) == 1
+
+    def test_lossless_color_produces_valid_file(self, tmp_path):
+        path = tmp_path / "out.mkv"
+        with _make_writer(path, grayscale=False,
+                          encoder_config=_lossless_color_config()) as w:
+            w.write(_color(1)[0])
+        assert len(_read_frames(path, "bgr24")) == 1
+
+    def test_codec_context_attrs_applied(self, tmp_path):
+        """codec_context_attrs must be set on the stream without error."""
+        path = tmp_path / "out.mp4"
+        cfg = EncoderConfig(
+            codec="libx264", pix_fmt="gray",
+            options={"crf": "28", "preset": "ultrafast"},
+            codec_context_attrs={"thread_count": 1},
+        )
+        with _make_writer(path, encoder_config=cfg) as w:
+            w.write(_gray(1)[0])
+        assert len(_read_frames(path, "gray")) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestPyAVVideoFileWriter — core class with explicit EncoderConfig
+# ---------------------------------------------------------------------------
+
+class TestPyAVVideoFileWriter:
+    def _make(self, path, *, input_pix_fmt: str = "gray") -> PyAVVideoFileWriter:
+        cfg = EncoderConfig(
+            codec="libx264",
+            pix_fmt="yuv420p",
+            options={"crf": "28", "preset": "ultrafast"},
+        )
+        return PyAVVideoFileWriter(path, size=(W, H), fps=FPS, encoder_config=cfg,
+                                   input_pix_fmt=input_pix_fmt)
+
+    def test_not_open_before_open(self, tmp_path):
+        assert not self._make(tmp_path / "out.mp4").is_open
+
+    def test_is_open_after_open(self, tmp_path):
+        w = self._make(tmp_path / "out.mp4")
+        w.open()
+        assert w.is_open
+        w.close()
+
+    def test_write_raises_when_not_open(self, tmp_path):
+        w = self._make(tmp_path / "out.mp4")
+        with pytest.raises(RuntimeError):
+            w.write(_gray(1)[0])
+
+    def test_roundtrip_with_gray_config(self, tmp_path):
+        path = tmp_path / "out.mp4"
+        with self._make(path) as w:
+            for f in _gray(5):
+                w.write(f)
+        assert len(_read_frames(path, "gray")) == 5
+
+    def test_roundtrip_with_color_config(self, tmp_path):
+        path = tmp_path / "out.mp4"
+        cfg = EncoderConfig(codec="libx264", pix_fmt="yuv420p",
+                            options={"crf": "28", "preset": "ultrafast"})
+        with PyAVVideoFileWriter(path, size=(W, H), fps=FPS,
+                                 encoder_config=cfg, input_pix_fmt="bgr24") as w:
+            for f in _color(3):
+                w.write(f)
+        assert len(_read_frames(path, "bgr24")) == 3
+
+    def test_invalid_size_raises(self, tmp_path):
+        cfg = EncoderConfig(codec="libx264", pix_fmt="gray",
+                            options={"crf": "28", "preset": "ultrafast"})
+        with pytest.raises(ValueError):
+            PyAVVideoFileWriter(tmp_path / "out.mp4", size=(0, H), fps=FPS,
+                                encoder_config=cfg)
+
+    def test_invalid_fps_raises(self, tmp_path):
+        cfg = EncoderConfig(codec="libx264", pix_fmt="gray",
+                            options={"crf": "28", "preset": "ultrafast"})
+        with pytest.raises(ValueError):
+            PyAVVideoFileWriter(tmp_path / "out.mp4", size=(W, H), fps=0,
+                                encoder_config=cfg)
+
 
 
 

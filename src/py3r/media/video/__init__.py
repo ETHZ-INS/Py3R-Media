@@ -16,15 +16,15 @@ class VideoSource(Protocol):
     # --- capabilities/probing (callable pre-open; stable after open)
     def has_timing(self) -> bool: ...
 
-    def has_size(self) -> bool: ...
-    def has_fps(self) -> bool: ...
+    def has_size(self) -> bool: ...  # Has a known frame size
+    def has_fps(self) -> bool: ...  # Has a known frame rate
     def has_num_frames(self) -> bool: ...  # Has a known number of frames
-    def is_seekable(self) -> bool: ...
+    def is_seekable(self) -> bool: ...  # Can seek to a specific frame
 
-    def get_size(self) -> Optional[Tuple[int, int]]: ...     # (width, height) or None if variable
-    def get_fps(self) -> Optional[float]: ...                 # or None if live/unknown
-    def get_num_channels(self) -> int: ...                   # 1 or 3 (or more for special devices)
-    def get_num_frames(self) -> Optional[int]: ...               # or None if live/unknown
+    def get_size(self) -> Optional[Tuple[int, int]]: ...  # (width, height) or None if unknown/variable
+    def get_fps(self) -> Optional[float]: ...  # fps or None if unknown/variable
+    def get_num_channels(self) -> int: ...  # Usually 1 or 3, but could be more for special devices
+    def get_num_frames(self) -> Optional[int]: ...  # Number of frames or None if live/unknown
 
     def seek(self, frame_index: int) -> None: ...
 

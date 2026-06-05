@@ -1,28 +1,25 @@
 """
 Unit tests for PyAVWebcamSource — no hardware required.
 
-Fake objects
+All calls to ``av.open`` are patched out.  Reader-loop behaviour (frame
+delivery, EOF, errors, timeout, queue saturation) is covered separately in
+``test_pyav_container_reader.py``.
+
+Test doubles
 ------------
-FakeAVFrame
-    Minimal duck-type for av.VideoFrame.  Only the three attributes used
-    by _reader_loop and _frame_timestamp_seconds are implemented.
-
 FakeContainer
-    Drives the reader thread with a list of frames (or blocks forever).
-    Uses MagicMock for .streams so that _select_video_stream works without
-    a separate FakeStream class.
+    Minimal duck-type for an ``av.InputContainer``.  Provides a ``streams``
+    list with one pre-configured MagicMock video stream (W×H @ FPS) and a
+    ``close()`` method.  ``decode()`` terminates immediately (no frames), so
+    probing never blocks.
 
-Factory pattern
----------------
-_make_factory() returns a spy factory callable and a 'calls' list.
-Each call to the factory creates a fresh FakeContainer, records the
-(file, format, mode, options) arguments, and appends the result to calls.
-
-    calls[0]  — probe container (opened and close()d by _probe())
-    calls[1]  — live container  (created by open(); tests inspect this one)
-
-_make_source() is a convenience wrapper for tests that don't need to
-inspect factory arguments directly.
+Patching strategy
+-----------------
+``av.open`` is patched with a ``side_effect`` callable that returns a fresh
+``FakeContainer`` on every call.  This means the probe container (created
+during ``__init__``) and the live container (created during ``open()``) are
+independent objects.  Tests that need to inspect call arguments use
+``mock_open.call_args`` or ``mock_open.call_args_list``.
 """
 
 from __future__ import annotations
@@ -30,10 +27,8 @@ from __future__ import annotations
 import sys
 import threading
 import time
-from fractions import Fraction
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
 
 from py3r.media.video.pyav_webcam_source import PyAVWebcamSource
@@ -47,189 +42,125 @@ EXPECTED_FORMAT = "dshow" if sys.platform == "win32" else (
 
 
 # ---------------------------------------------------------------------------
-# Fake PyAV objects
+# Fake container
 # ---------------------------------------------------------------------------
-
-class FakeAVFrame:
-    """Duck-type for av.VideoFrame.  Only the surface used by _reader_loop."""
-
-    def __init__(self, img: np.ndarray, *, time: float | None = 0.0,
-                 pts: int | None = None, time_base: Fraction | None = None):
-        self.img = img
-        self.time = time
-        self.pts = pts
-        self.time_base = time_base
-
-    def to_ndarray(self, format: str) -> np.ndarray:  # noqa: A002
-        return self.img.copy()
-
 
 class FakeContainer:
     """
-    Produces frames from a list, optionally blocking or raising an error.
+    Minimal av.InputContainer duck-type.
 
-    .streams is a MagicMock list so _select_video_stream works without a
-    separate stream stub class.
+    decode() either blocks until close() or terminates immediately (no frames).
+    streams[0] is a MagicMock configured with W, H, FPS so that
+    _update_size_and_fps_from_stream extracts real metadata without touching av.
     """
 
-    def __init__(self, av_frames: list[FakeAVFrame], *,
-                 error: Exception | None = None,
-                 block_until_closed: bool = False):
-        self._frames = av_frames
-        self._error = error
+    def __init__(self, *, block_until_closed: bool = False):
         self._block_until_closed = block_until_closed
         self._closed = threading.Event()
         self.all_frames_yielded = threading.Event()
 
-        # MagicMock stream: attribute access/assignment works transparently.
         mock_stream = MagicMock()
         mock_stream.type = "video"
         mock_stream.codec_context.width = W
         mock_stream.codec_context.height = H
         mock_stream.average_rate = FPS
-        self.streams = [mock_stream]
+
+        mock_stream2 = MagicMock()
+        mock_stream2.type = "video"
+        mock_stream2.codec_context.width = W
+        mock_stream2.codec_context.height = H
+        mock_stream2.average_rate = FPS
+
+        self.streams = [mock_stream, mock_stream2]
 
     def decode(self, stream):  # noqa: ARG002
         if self._block_until_closed:
             self._closed.wait()
             return
-        yield from self._frames
         self.all_frames_yielded.set()
-        if self._error is not None:
-            raise self._error
+        return
+        yield  # make this a generator
 
     def close(self) -> None:
         self._closed.set()
 
 
-# ---------------------------------------------------------------------------
-# Factory helpers
-# ---------------------------------------------------------------------------
-
-def _make_factory(av_frames: list[FakeAVFrame], *,
-                  error: Exception | None = None,
-                  block_until_closed: bool = False):
-    """
-    Return (factory, calls).
-
-    calls is a list of dicts:
-        {"file": str, "format": str, "mode": str,
-         "options": dict, "container": FakeContainer}
-    """
-    calls: list[dict] = []
-
-    def factory(file: str, *, format: str, mode: str, options: dict):  # noqa: A002
-        container = FakeContainer(av_frames, error=error,
-                                  block_until_closed=block_until_closed)
-        calls.append({"file": file, "format": format, "mode": mode,
-                       "options": dict(options), "container": container})
-        return container
-
-    return factory, calls
-
-
-def _make_source(av_frames: list[FakeAVFrame], *,
-                 grayscale: bool = True, queue_size: int = 8,
-                 error: Exception | None = None,
-                 block_until_closed: bool = False):
-    """Convenience wrapper. Returns (src, calls)."""
-    factory, calls = _make_factory(av_frames, error=error,
-                                   block_until_closed=block_until_closed)
-    src = PyAVWebcamSource(
-        DEVICE,
-        grayscale=grayscale,
-        width=W, height=H, fps=FPS,
-        queue_size=queue_size,
-        container_factory=factory,
-    )
-    # calls[0] = probe container (already closed).  calls[1] = after open().
-    return src, calls
-
-
-def _gray(val: int = 128) -> np.ndarray:
-    return np.full((H, W), val, dtype=np.uint8)
-
-
-def _color(val: int = 128) -> np.ndarray:
-    img = np.zeros((H, W, 3), dtype=np.uint8)
-    img[:, :, 0] = val
-    return img
-
-
-def _live(calls: list[dict]) -> FakeContainer:
-    """Return the container created by the most recent open() call."""
-    return calls[-1]["container"]
+def _container_factory(*, block_until_closed: bool = False):
+    """Return a side_effect callable that creates a fresh FakeContainer per call."""
+    def factory(**_kw):
+        return FakeContainer(block_until_closed=block_until_closed)
+    return factory
 
 
 # ---------------------------------------------------------------------------
-# Container factory arguments
+# av.open arguments (tests _open_container call site)
 # ---------------------------------------------------------------------------
 
-class TestContainerFactoryArgs:
+class TestOpenArgs:
     """Verify that _open_container passes the right arguments to av.open."""
 
-    def _args(self, **kwargs) -> dict:
-        """Construct source with given kwargs, return the probe call record."""
-        factory, calls = _make_factory([])
-        PyAVWebcamSource(DEVICE, container_factory=factory, **kwargs)
-        return calls[0]  # probe call
+    def _probe_kwargs(self, **src_kwargs) -> dict:
+        with patch("av.open", side_effect=_container_factory()) as mock_open:
+            PyAVWebcamSource(DEVICE, **src_kwargs)
+        return mock_open.call_args.kwargs
 
     def test_file_is_device_name(self):
-        rec = self._args()
-        # dshow requires "video=<name>"; other platforms use the name directly.
-        if rec["format"] == "dshow":
-            assert rec["file"] == f"video={DEVICE}"
+        kw = self._probe_kwargs()
+        if kw["format"] == "dshow":
+            assert kw["file"] == f"video={DEVICE}"
         else:
-            assert rec["file"] == DEVICE
+            assert kw["file"] == DEVICE
 
     def test_format_is_platform_default(self):
-        assert self._args()["format"] == EXPECTED_FORMAT
+        assert self._probe_kwargs()["format"] == EXPECTED_FORMAT
 
     def test_explicit_format_is_forwarded(self):
-        factory, calls = _make_factory([])
-        PyAVWebcamSource(DEVICE, input_format="v4l2", container_factory=factory)
-        assert calls[0]["format"] == "v4l2"
+        assert self._probe_kwargs(input_format="v4l2")["format"] == "v4l2"
 
     def test_mode_is_read(self):
-        assert self._args()["mode"] == "r"
+        assert self._probe_kwargs()["mode"] == "r"
 
     def test_options_video_size(self):
-        opts = self._args(width=1280, height=720)["options"]
+        opts = self._probe_kwargs(width=1280, height=720)["options"]
         assert opts["video_size"] == "1280x720"
 
     def test_options_framerate(self):
-        opts = self._args(fps=60.0)["options"]
+        opts = self._probe_kwargs(fps=60.0)["options"]
         assert opts["framerate"] == "60.0"
 
     def test_options_rtbufsize_on_dshow(self):
-        factory, calls = _make_factory([])
-        PyAVWebcamSource(DEVICE, input_format="dshow", container_factory=factory)
-        assert calls[0]["options"].get("rtbufsize") == "500M"
+        with patch("av.open", side_effect=_container_factory()) as mock_open:
+            PyAVWebcamSource(DEVICE, input_format="dshow")
+        assert mock_open.call_args.kwargs["options"].get("rtbufsize") == "500M"
 
     def test_no_rtbufsize_on_v4l2(self):
-        factory, calls = _make_factory([])
-        PyAVWebcamSource(DEVICE, input_format="v4l2", container_factory=factory)
-        assert "rtbufsize" not in calls[0]["options"]
+        with patch("av.open", side_effect=_container_factory()) as mock_open:
+            PyAVWebcamSource(DEVICE, input_format="v4l2")
+        assert "rtbufsize" not in mock_open.call_args.kwargs["options"]
 
     def test_no_size_options_when_not_specified(self):
-        opts = self._args()["options"]
-        assert "video_size" not in opts
+        assert "video_size" not in self._probe_kwargs()["options"]
 
     def test_no_framerate_option_when_not_specified(self):
-        opts = self._args()["options"]
-        assert "framerate" not in opts
+        assert "framerate" not in self._probe_kwargs()["options"]
 
     def test_probe_and_open_receive_identical_args(self):
-        """Both probe and live session should pass identical av.open arguments."""
-        factory, calls = _make_factory([], block_until_closed=True)
-        src = PyAVWebcamSource(DEVICE, container_factory=factory,
-                                width=W, height=H, fps=FPS)
-        src.open()
-        src.close()
-        assert len(calls) == 2
-        probe, live = calls[0], calls[1]
+        """Both probe and live session pass identical arguments to av.open."""
+        seen: list[dict] = []
+
+        def factory(**kw):
+            seen.append(dict(kw))
+            return FakeContainer(block_until_closed=True)
+
+        with patch("av.open", side_effect=factory):
+            src = PyAVWebcamSource(DEVICE, width=W, height=H, fps=FPS)
+            src.open()
+            src.close()
+
+        assert len(seen) == 2
+        probe_kw, live_kw = seen
         for key in ("file", "format", "mode", "options"):
-            assert probe[key] == live[key], f"Mismatch on {key!r}"
+            assert probe_kw[key] == live_kw[key], f"Mismatch on {key!r}"
 
     def test_raises_without_device_name(self):
         with pytest.raises(TypeError):
@@ -237,162 +168,109 @@ class TestContainerFactoryArgs:
 
 
 # ---------------------------------------------------------------------------
-# Frame delivery
+# Probe — metadata extraction
 # ---------------------------------------------------------------------------
 
-class TestFrameDelivery:
-    def test_frames_arrive_in_order(self):
-        av_frames = [FakeAVFrame(_gray(i * 50), time=i / FPS) for i in range(5)]
-        src, calls = _make_source(av_frames)
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        frames = [src.read(timeout=2.0) for _ in range(5)]
-        src.close()
-        assert [f.frame_index for f in frames] == list(range(5))
+class TestProbe:
+    def test_size_from_stream_metadata(self):
+        with patch("av.open", side_effect=_container_factory()):
+            src = PyAVWebcamSource(DEVICE)
+        assert src.get_size() == (W, H)
 
-    def test_frame_content_matches_input(self):
-        expected = _gray(200)
-        src, calls = _make_source([FakeAVFrame(expected, time=0.0)])
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        frame = src.read(timeout=2.0)
-        src.close()
-        np.testing.assert_array_equal(frame.img, expected)
+    def test_fps_from_stream_metadata(self):
+        with patch("av.open", side_effect=_container_factory()):
+            src = PyAVWebcamSource(DEVICE)
+        assert src.get_fps() == pytest.approx(FPS)
 
-    def test_grayscale_shape_and_dtype(self):
-        src, calls = _make_source([FakeAVFrame(_gray(), time=0.0)])
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        frame = src.read(timeout=2.0)
-        src.close()
-        assert frame.img.shape == (H, W) and frame.img.dtype == np.uint8
+    def test_given_size_skips_probe_decode(self):
+        with patch("av.open", side_effect=_container_factory()):
+            src = PyAVWebcamSource(DEVICE, width=320, height=240)
+        assert src.get_size() == (320, 240)
 
-    def test_color_shape_and_dtype(self):
-        src, calls = _make_source([FakeAVFrame(_color(), time=0.0)], grayscale=False)
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        frame = src.read(timeout=2.0)
-        src.close()
-        assert frame.img.shape == (H, W, 3) and frame.img.dtype == np.uint8
+    def test_probe_failure_leaves_size_none(self):
+        with patch("av.open", side_effect=RuntimeError("no device")):
+            src = PyAVWebcamSource(DEVICE)
+        assert src.get_size() is None
 
-    def test_timestamp_from_frame_time(self):
-        src, calls = _make_source([FakeAVFrame(_gray(), time=1.234)])
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        frame = src.read(timeout=2.0)
-        src.close()
-        assert frame.timestamp == pytest.approx(1.234)
+    def test_has_size_after_probe(self):
+        with patch("av.open", side_effect=_container_factory()):
+            src = PyAVWebcamSource(DEVICE)
+        assert src.has_size()
 
-    def test_timestamp_pts_fallback(self):
-        """frame.time=None → pts * time_base is used."""
-        av_frame = FakeAVFrame(_gray(), time=None, pts=45, time_base=Fraction(1, 30))
-        src, calls = _make_source([av_frame])
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        frame = src.read(timeout=2.0)
-        src.close()
-        assert frame.timestamp == pytest.approx(1.5, abs=0.01)
+    def test_has_fps_after_probe(self):
+        with patch("av.open", side_effect=_container_factory()):
+            src = PyAVWebcamSource(DEVICE)
+        assert src.has_fps()
 
 
 # ---------------------------------------------------------------------------
-# End-of-stream
+# Stream index
 # ---------------------------------------------------------------------------
 
-class TestEndOfStream:
-    def test_eof_returns_none(self):
-        src, calls = _make_source([FakeAVFrame(_gray(), time=0.0)])
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        src.read(timeout=2.0)
-        time.sleep(0.1)
-        assert src.read(timeout=0.5) is None
-        src.close()
+class TestStreamIndex:
+    def _container_with_streams(self, *types):
+        """Build a mock container whose streams have the given type strings."""
+        streams = []
+        for t in types:
+            s = MagicMock()
+            s.type = t
+            streams.append(s)
+        container = MagicMock()
+        container.streams = streams
+        return container, streams
 
-    def test_read_after_eof_keeps_returning_none(self):
-        src, calls = _make_source([FakeAVFrame(_gray(), time=0.0)])
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        src.read(timeout=2.0)
-        time.sleep(0.1)
-        assert src.read(timeout=0.2) is None
-        assert src.read(timeout=0.2) is None
-        src.close()
+    def test_none_selects_first_video_stream(self):
+        container, streams = self._container_with_streams("video", "video")
+        assert PyAVWebcamSource._select_video_stream(container) is streams[0]
 
+    def test_none_skips_non_video_to_find_first_video(self):
+        container, streams = self._container_with_streams("audio", "video")
+        assert PyAVWebcamSource._select_video_stream(container) is streams[1]
 
-# ---------------------------------------------------------------------------
-# Error handling
-# ---------------------------------------------------------------------------
+    def test_integer_indexes_all_streams(self):
+        container, streams = self._container_with_streams("audio", "video")
+        assert PyAVWebcamSource._select_video_stream(container, stream_index=1) is streams[1]
 
-class TestErrorHandling:
-    def test_reader_exception_raised_to_caller(self):
-        boom = ValueError("simulated av error")
-        src, calls = _make_source([], error=boom)
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        time.sleep(0.1)
-        with pytest.raises(RuntimeError, match="reader failed"):
-            src.read(timeout=2.0)
-        src.close()
+    def test_integer_selects_second_video_stream_by_absolute_index(self):
+        container, streams = self._container_with_streams("video", "video")
+        assert PyAVWebcamSource._select_video_stream(container, stream_index=1) is streams[1]
 
-    def test_original_exception_is_chained(self):
-        boom = ValueError("original cause")
-        src, calls = _make_source([], error=boom)
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        time.sleep(0.1)
-        with pytest.raises(RuntimeError) as exc_info:
-            src.read(timeout=2.0)
-        src.close()
-        assert exc_info.value.__cause__ is boom
+    def test_integer_non_video_raises(self):
+        container, _ = self._container_with_streams("audio", "video")
+        with pytest.raises(RuntimeError, match="not a video stream"):
+            PyAVWebcamSource._select_video_stream(container, stream_index=0)
 
+    def test_integer_out_of_range_raises(self):
+        container, _ = self._container_with_streams("video")
+        with pytest.raises(RuntimeError, match="out of range"):
+            PyAVWebcamSource._select_video_stream(container, stream_index=5)
 
-# ---------------------------------------------------------------------------
-# Timeout
-# ---------------------------------------------------------------------------
+    def test_none_no_video_stream_raises(self):
+        container, _ = self._container_with_streams("audio", "data")
+        with pytest.raises(RuntimeError, match="No video stream"):
+            PyAVWebcamSource._select_video_stream(container)
 
-class TestTimeout:
-    def test_short_timeout_raises(self):
-        src, _ = _make_source([], block_until_closed=True)
-        src.open()
-        with pytest.raises(TimeoutError):
-            src.read(timeout=0.05)
-        src.close()
+    def test_empty_streams_none_raises(self):
+        container = MagicMock()
+        container.streams = []
+        with pytest.raises(RuntimeError, match="No video stream"):
+            PyAVWebcamSource._select_video_stream(container)
 
-    def test_generous_timeout_does_not_raise_if_frame_arrives(self):
-        src, calls = _make_source([FakeAVFrame(_gray(), time=0.0)])
-        src.open()
-        frame = src.read(timeout=3.0)
-        src.close()
-        assert frame is not None
+    def test_stream_index_forwarded_to_select(self):
+        """stream_index=1 passed to PyAVWebcamSource reaches _select_video_stream."""
+        seen_indices: list = []
+        original = PyAVWebcamSource._select_video_stream
 
+        def spy(container, stream_index=None):
+            seen_indices.append(stream_index)
+            return original(container, stream_index)
 
-# ---------------------------------------------------------------------------
-# close() unblocks read()
-# ---------------------------------------------------------------------------
+        with patch("av.open", side_effect=_container_factory()):
+            with patch.object(PyAVWebcamSource, "_select_video_stream",
+                              staticmethod(spy)):
+                PyAVWebcamSource(DEVICE, stream_index=1)
 
-class TestCloseUnblocks:
-    def test_close_from_other_thread_unblocks_read(self):
-        src, _ = _make_source([], block_until_closed=True)
-        src.open()
-
-        result_holder: list = []
-        exc_holder: list = []
-
-        def _reader():
-            try:
-                result_holder.append(src.read(timeout=10.0))
-            except Exception as e:
-                exc_holder.append(e)
-
-        t = threading.Thread(target=_reader)
-        t.start()
-        time.sleep(0.1)
-        src.close()
-        t.join(timeout=3.0)
-
-        assert not t.is_alive(), "read() did not unblock after close()"
-        assert not exc_holder, f"Unexpected exception: {exc_holder}"
-        assert result_holder == [None]
+        assert 1 in seen_indices
 
 
 # ---------------------------------------------------------------------------
@@ -401,93 +279,81 @@ class TestCloseUnblocks:
 
 class TestLifecycle:
     def test_not_open_before_open(self):
-        src, _ = _make_source([])
-        assert not src.is_open()
+        with patch("av.open", side_effect=_container_factory()):
+            src = PyAVWebcamSource(DEVICE)
+            assert not src.is_open()
 
     def test_is_open_after_open(self):
-        src, _ = _make_source([], block_until_closed=True)
-        src.open()
-        assert src.is_open()
-        src.close()
+        with patch("av.open", side_effect=_container_factory(block_until_closed=True)):
+            src = PyAVWebcamSource(DEVICE, width=W, height=H, fps=FPS)
+            src.open()
+            assert src.is_open()
+            src.close()
 
     def test_is_closed_after_close(self):
-        src, _ = _make_source([], block_until_closed=True)
-        src.open()
-        src.close()
-        assert not src.is_open()
+        with patch("av.open", side_effect=_container_factory(block_until_closed=True)):
+            src = PyAVWebcamSource(DEVICE, width=W, height=H, fps=FPS)
+            src.open()
+            src.close()
+            assert not src.is_open()
 
     def test_double_close_is_safe(self):
-        src, _ = _make_source([], block_until_closed=True)
-        src.open()
-        src.close()
-        src.close()
-
-    def test_frame_index_starts_at_zero(self):
-        src, calls = _make_source([FakeAVFrame(_gray(), time=0.0)])
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        frame = src.read(timeout=2.0)
-        src.close()
-        assert frame.frame_index == 0
-
-    def test_frame_index_resets_on_reopen(self):
-        """After close() + open(), _idx must restart from 0."""
-        factory, calls = _make_factory(
-            [FakeAVFrame(_gray(i * 80), time=i / FPS) for i in range(3)]
-        )
-        src = PyAVWebcamSource(DEVICE, width=W, height=H, fps=FPS,
-                                container_factory=factory)
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        for _ in range(3):
-            src.read(timeout=2.0)
-        src.close()
-
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=3.0)
-        frame = src.read(timeout=2.0)
-        src.close()
-        assert frame.frame_index == 0
+        with patch("av.open", side_effect=_container_factory(block_until_closed=True)):
+            src = PyAVWebcamSource(DEVICE, width=W, height=H, fps=FPS)
+            src.open()
+            src.close()
+            src.close()
 
     def test_open_is_idempotent(self):
-        src, _ = _make_source([], block_until_closed=True)
-        src.open()
-        thread_before = src._reader_thread
-        src.open()
-        assert src._reader_thread is thread_before
-        src.close()
+        with patch("av.open", side_effect=_container_factory(block_until_closed=True)):
+            src = PyAVWebcamSource(DEVICE, width=W, height=H, fps=FPS)
+            src.open()
+            reader_before = src._container_reader
+            src.open()
+            assert src._container_reader is reader_before
+            src.close()
+
+    def test_frame_index_resets_on_reopen(self):
+        """After close() + open(), the reader restarts at frame index 0."""
+        import numpy as np
+        from tests.unit.test_pyav_container_reader import FakeAVFrame
+        from tests.unit.test_pyav_container_reader import FakeContainer as FC
+
+        frames = [
+            FakeAVFrame(np.full((H, W), i * 80, dtype=np.uint8), time=i / FPS)
+            for i in range(3)
+        ]
+        containers: list = []
+
+        def factory(**_kw):
+            c = FC(frames[:])
+            containers.append(c)
+            return c
+
+        with patch("av.open", side_effect=factory):
+            src = PyAVWebcamSource(DEVICE, width=W, height=H, fps=FPS)
+            src.open()
+            assert containers[-1].all_frames_yielded.wait(timeout=3.0)
+            for _ in range(3):
+                src.read(timeout=2.0)
+            src.close()
+
+            src.open()
+            assert containers[-1].all_frames_yielded.wait(timeout=3.0)
+            frame = src.read(timeout=2.0)
+            src.close()
+
+        assert frame.frame_index == 0
 
 
 # ---------------------------------------------------------------------------
-# Queue saturation
+# Not open
 # ---------------------------------------------------------------------------
 
-class TestQueueSaturation:
-    def test_oldest_frames_dropped_when_full(self):
-        N, QUEUE_SIZE = 12, 3
-        av_frames = [FakeAVFrame(_gray(i * 20), time=i / FPS) for i in range(N)]
-        src, calls = _make_source(av_frames, queue_size=QUEUE_SIZE)
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=5.0)
-        time.sleep(0.05)
-
-        received = []
-        while True:
-            f = src.read(timeout=0.2)
-            if f is None:
-                break
-            received.append(f)
-        src.close()
-
-        assert len(received) <= QUEUE_SIZE
-        assert received[-1].frame_index == N - 1
-
-    def test_no_deadlock_under_saturation(self):
-        av_frames = [FakeAVFrame(_gray(), time=i / FPS) for i in range(50)]
-        src, calls = _make_source(av_frames, queue_size=2)
-        src.open()
-        assert _live(calls).all_frames_yielded.wait(timeout=5.0)
-        src.close()
-
-
+class TestNotOpen:
+    def test_read_raises_when_not_open(self):
+        with patch("av.open", side_effect=_container_factory()):
+            src = PyAVWebcamSource(DEVICE)
+        with pytest.raises(RuntimeError, match="not open"):
+            src.read()
 
